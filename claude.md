@@ -227,6 +227,13 @@ Phase 9 found for CIK-adjacent tickers.
   response, same as `scrape_pageviews.py`'s article lookups — not retried.
 - "Fixed-layout" in FINRA's own docs means a fixed *file naming/column*
   layout, not fixed-width text — the body is pipe-delimited.
+- `cdn.finra.org` answers **403, not 404**, for a file that isn't posted yet
+  (confirmed live 2026-11-11). Treated as "no file" but logged — a 403 on
+  every day would mean we're blocked.
+- **Volumes are fractional** (`259692.896076`, fractional-share trades). The
+  original `isdigit()` check silently dropped ~96% of each day (429 of 12,307
+  rows on 2026-11-10). Columns are now `DOUBLE`; `ensure_table` widens an old
+  `BIGINT` table in place.
 
 ## Phase 12 — patents — ✅ DONE (built, not yet exercised live -- see below)
 

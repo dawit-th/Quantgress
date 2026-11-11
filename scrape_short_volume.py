@@ -51,8 +51,26 @@ TABLE = "short_volume"
 def ensure_table(con):
     con.execute(f"""CREATE TABLE IF NOT EXISTS {TABLE} (
         trade_date VARCHAR, symbol VARCHAR,
-        short_volume BIGINT, short_exempt_volume BIGINT, total_volume BIGINT,
+        short_volume DOUBLE, short_exempt_volume DOUBLE, total_volume DOUBLE,
         market VARCHAR, PRIMARY KEY (trade_date, symbol, market))""")
+    # Tables created before FINRA went fractional have BIGINT volumes; widen
+    # them in place so the fractional rows parse_file now keeps can be stored.
+    for col in ("short_volume", "short_exempt_volume", "total_volume"):
+        (typ,) = con.execute(
+            "SELECT data_type FROM information_schema.columns "
+            "WHERE table_name = ? AND column_name = ?", [TABLE, col]).fetchone()
+        if typ != "DOUBLE":
+            con.execute(f"ALTER TABLE {TABLE} ALTER {col} TYPE DOUBLE")
+
+
+def _num(s):
+    """FINRA volume field -> float, or None if it isn't a number. Volumes have
+    been fractional since late 2026 (fractional-share trades reported to the
+    TRFs, e.g. '259692.896076'), so an isdigit() check drops ~96% of a day."""
+    try:
+        return float(s)
+    except ValueError:
+        return None
 
 
 def parse_file(text, trade_date):
@@ -70,13 +88,14 @@ def parse_file(text, trade_date):
         if len(parts) != 6 or parts[0] == "Date":
             continue
         _date, symbol, short_vol, short_exempt, total_vol, market = parts
-        if not (symbol and short_vol.isdigit() and total_vol.isdigit()):
+        short_vol, total_vol = _num(short_vol), _num(total_vol)
+        if not symbol or short_vol is None or total_vol is None:
             continue
         rows.append({
             "trade_date": trade_date, "symbol": symbol,
-            "short_volume": int(short_vol),
-            "short_exempt_volume": int(short_exempt) if short_exempt.isdigit() else 0,
-            "total_volume": int(total_vol),
+            "short_volume": short_vol,
+            "short_exempt_volume": _num(short_exempt) or 0.0,
+            "total_volume": total_vol,
             "market": market,
         })
     return rows
@@ -91,7 +110,8 @@ def _session():
 def _get(s, url, tries=4):
     """GET with retry. A 404 here is a legitimate response (weekday holiday,
     or today's file not posted by 6pm ET yet) -- not a transient failure, so
-    like scrape_pageviews._get it does NOT retry on 404."""
+    like scrape_pageviews._get it does NOT retry on 404. FINRA's CDN returns
+    403 instead of 404 for a not-yet-posted file, so 403 is handled the same."""
     for attempt in range(tries):
         try:
             r = s.get(url, timeout=30)
@@ -103,6 +123,12 @@ def _get(s, url, tries=4):
         if r.status_code == 200:
             return r
         if r.status_code == 404:
+            return None
+        if r.status_code == 403:
+            # cdn.finra.org answers 403, not 404, for a file that isn't posted
+            # yet (confirmed live 2026-11-11 on today's file). Treat it as "no
+            # file", but say so -- a 403 on every day would mean we're blocked.
+            print(f"  403 from FINRA (not posted yet?): {url}")
             return None
         if attempt == tries - 1:
             r.raise_for_status()
@@ -236,6 +262,37 @@ def selftest():
         assert _AlwaysNotFound.calls == 1  # no retry loop burned on a 404
     finally:
         time.sleep = real_sleep
+
+    # FINRA's CDN says 403 (not 404) for today's file before ~6pm ET
+    class _Forbidden:
+        calls = 0
+
+        def get(self, *a, **k):
+            _Forbidden.calls += 1
+            return type("R", (), {"status_code": 403})()
+
+    try:
+        assert _get(_Forbidden(), "http://example.invalid", tries=4) is None
+        assert _Forbidden.calls == 1
+    finally:
+        time.sleep = real_sleep
+
+    # fractional volumes (live since late 2026) must be kept, not dropped
+    frac = parse_file("Date|Symbol|ShortVolume|ShortExemptVolume|TotalVolume|Market\n"
+                      "20261110|A|259692.896076|48|492393.480923|B,Q,N\n",
+                      "2026-11-10")
+    assert len(frac) == 1 and frac[0]["short_volume"] == 259692.896076
+    assert frac[0]["short_exempt_volume"] == 48.0
+
+    # an old BIGINT table gets widened in place, existing rows kept
+    con = duckdb.connect(":memory:")
+    con.execute(f"""CREATE TABLE {TABLE} (trade_date VARCHAR, symbol VARCHAR,
+        short_volume BIGINT, short_exempt_volume BIGINT, total_volume BIGINT,
+        market VARCHAR, PRIMARY KEY (trade_date, symbol, market))""")
+    con.execute(f"INSERT INTO {TABLE} VALUES ('2026-11-10','X',1,0,2,'Q')")
+    ensure_table(con)
+    con.execute(f"INSERT INTO {TABLE} VALUES ('2026-11-10','Y',1.5,0,2.5,'Q')")
+    assert con.execute(f"SELECT sum(total_volume) FROM {TABLE}").fetchone()[0] == 4.5
 
     print("selftest ok")
 
