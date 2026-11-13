@@ -329,7 +329,28 @@ py daily.py --selftest    # offline check, instant
 py daily.py                # run it once
 ```
 
-Scheduled with the OS's native scheduler, not a long-running Python process:
+Scheduled with the OS's native scheduler, not a long-running Python process.
+
+**macOS (launchd)** — same jobs and times as `deploy/cron.d/`, installed as per-user LaunchAgents:
+
+```bash
+sh deploy/launchd/install.sh              # write + load the 5 jobs into ~/Library/LaunchAgents
+sh deploy/launchd/install.sh --status     # loaded jobs + last exit code
+launchctl kickstart gui/$(id -u)/com.quantgress.daily   # run one now
+sh deploy/launchd/install.sh --uninstall  # remove them
+```
+
+| Job | When (local time) | Runs, in order |
+|---|---|---|
+| `com.quantgress.daily` | every day 06:00 | `daily.py`, `scrape_short_volume.py`, `scrape_insiders.py --live`, `scrape_wsb.py` |
+| `com.quantgress.weekly` | Sunday 07:00 | `scrape_contracts.py`, `scrape_patents.py` |
+| `com.quantgress.quarterly` | Jan/Apr/Jul/Oct 1st 08:00 | `scrape_13f.py`, `scrape_lobbying.py` |
+| `com.quantgress.annual-jan` | Jan 2nd 09:00 | `scrape_donors.py`, `scrape_execcomp.py`, `scrape_senate_annual.py` |
+| `com.quantgress.annual-sep` | Sep 2nd 09:00 | `scrape_house_annual.py` |
+
+Each script logs to `logs/<name>.log` (same names as cron). Unlike the cron files, a cadence group runs its scripts **back to back in one job** rather than staggered 15 minutes apart: DuckDB allows one writer at a time, so a staggered job that starts while a long `daily.py` is still running dies on the file lock. A run time that passes while the Mac is asleep fires once on wake; a powered-off Mac skips it. Paths are taken from wherever the repo lives, so the plists aren't committed — the script generates them.
+
+**Windows (Task Scheduler):**
 
 ```
 schtasks /create /tn "Quantgress Daily" /sc daily /st 09:00 ^
@@ -338,7 +359,7 @@ schtasks /create /tn "Quantgress Daily" /sc daily /st 09:00 ^
 
 STOCK Act disclosures have a 30–45 day filing window, so a daily cadence is comfortably fast enough; a missed day is invisible and self-heals on the next run.
 
-**Beyond `daily.py`:** only Phases 1-3 run on the schedule above. The other 13 phases (lobbying, contracts, insider trades, 13F, short volume, patents, donors, pageviews, exec comp, Trump trades, annual disclosures, aircraft/flights, WSB mentions) are manual-only today (`py scrape_*.py`) — a real gap once any of that data is served publicly, since a paid tier can't silently go stale. `deploy/cron.d/` has the Linux deployment schedule for the Oracle Cloud box: one `/etc/cron.d` file per cadence group (daily/weekly/quarterly/annual, grouped by each source's actual upstream update frequency, not run nightly regardless) — see [`deploy/cron.d/README.md`](deploy/cron.d/README.md) for the install steps and the full phase-to-cadence mapping. Trump trades (Phase 17) is the one deliberate exception, left manual since ProPublica's mirror has no fixed publication schedule to key a cron line off of.
+**Beyond `daily.py`:** only Phases 1-3 run on the schedule above. The other 13 phases (lobbying, contracts, insider trades, 13F, short volume, patents, donors, pageviews, exec comp, Trump trades, annual disclosures, aircraft/flights, WSB mentions) are manual-only today (`py scrape_*.py`) — a real gap once any of that data is served publicly, since a paid tier can't silently go stale. `deploy/cron.d/` has the Linux deployment schedule for the Oracle Cloud box (and `deploy/launchd/` the same schedule for a Mac, above): one `/etc/cron.d` file per cadence group (daily/weekly/quarterly/annual, grouped by each source's actual upstream update frequency, not run nightly regardless) — see [`deploy/cron.d/README.md`](deploy/cron.d/README.md) for the install steps and the full phase-to-cadence mapping. Trump trades (Phase 17) is the one deliberate exception, left manual since ProPublica's mirror has no fixed publication schedule to key a cron line off of.
 
 ## Legal & Compliance
 
