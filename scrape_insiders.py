@@ -363,6 +363,13 @@ def main_live(days=DAYS_DEFAULT, limit=None):
     ensure_table(con)
     done = {(r[0], r[1]) for r in con.execute(
         f"SELECT accession_number, trans_seq FROM {TABLE}").fetchall()}
+    # Skip a filing already stored BEFORE fetching it, not after: the window
+    # overlaps the previous run by 6 of its 7 days, so checking only at insert
+    # time re-downloaded ~7k filings a day to keep a few hundred (a scheduled
+    # run took 17h and held the DB lock, 500-ing every api.py request). A
+    # filing with no Table I rows is never stored, so it still gets refetched
+    # -- a small minority, not worth a separate "seen" table.
+    done_acc = {acc for acc, _ in done}
 
     s = _session()
     added = skipped = 0
@@ -376,6 +383,9 @@ def main_live(days=DAYS_DEFAULT, limit=None):
         for path in filings:
             if limit is not None and added >= limit:
                 break
+            if accession_from_path(path) in done_acc:
+                skipped += 1
+                continue
             time.sleep(RATE_LIMIT_SECS)
             txt = fetch_filing(s, path)
             if not txt:
