@@ -217,7 +217,7 @@ python -m uvicorn api:app --reload                    # dev server, http://127.0
 python -m uvicorn api:app --host 0.0.0.0 --port 8000   # LAN-visible, trusted networks only
 ```
 
-**Browser UI:** with the server running, open **http://127.0.0.1:8000/ui** — a single static page (`static/ui.html`, no build step) over this same API. Paste a key once (it stays in that browser), then browse Senate/House trades, insider buys and sales, any dataset's filters, or look up a politician or ticker. Click a row for every field plus plain-English meanings of codes like `trans_code` and `acquired_disposed`; every query shows its equivalent `curl` command.
+**Browser UI:** with the server running, open **http://127.0.0.1:8000/ui** — a single static page (`static/ui.html`, no build step) over this same API. Paste a key once (it stays in that browser), then browse Senate/House trades, insider buys and sales, any dataset's filters, or look up a politician or ticker. Click a row for every field plus plain-English meanings of codes like `trans_code` and `acquired_disposed`; every query shows its equivalent `curl` command. The **Jobs** view has a **Run now** button per schedule group and shows each run live — queued, running (script by script), then ok/failed with timings — whether the run came from the button or the schedule.
 
 **It stays up while scrapers run.** DuckDB lets no other process open a file while a writer holds it, so the API reads `congress_trades.read.duckdb` — a copy `run_job.py` refreshes after each scheduled job (or `python snapshot.py` by hand) — instead of the live file. Data is at most one job old. Before the first snapshot exists it falls back to the live file; set `QG_API_DB` to point it anywhere else.
 
@@ -226,6 +226,8 @@ python -m uvicorn api:app --host 0.0.0.0 --port 8000   # LAN-visible, trusted ne
 | `GET /` | Dataset names, row counts, and each dataset's filter columns |
 | `GET /health` | Public, no key: newest date, age and `ok`/`stale` status of every dataset (see `health.py`), plus when the snapshot was taken |
 | `GET /ui` | The browser UI |
+| `GET /jobs` | Each schedule group's scripts, schedule, and last/current run status |
+| `POST /jobs/{group}` | Start a group now (`daily`, `weekly`, …), exactly as the scheduler would. Needs a key **and** a request from the machine the API runs on (`403` otherwise); `409` if it's already queued or running |
 | `GET /trades` | The unified congress-trades view. Filters: `tkr`, `last_name`, `chamber`, `tx_type`, `asset_type`, `date_suspect` (`true` = trade dated after its own filing — a typo in the source, kept as filed) |
 | `GET /politician/{name}` | Per-politician summary + trade listing (substring match on last name) |
 | `GET /ticker/{symbol}` | All activity for one ticker (exact, case-insensitive) |

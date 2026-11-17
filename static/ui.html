@@ -132,6 +132,24 @@ aside dd { margin: 0; word-break: break-word; }
 aside .legend { margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--rule); color: var(--ink-2); font-size: 11.5px; }
 aside .legend p { margin: 0 0 6px; }
 
+/* ── jobs ─────────────────────────────────────────────── */
+.jobs { border-top: 1px solid var(--ink); margin-top: 18px; }
+.job { display: grid; grid-template-columns: 150px minmax(0, 1fr) auto; gap: 6px 28px;
+       padding: 16px 0; border-bottom: 1px solid var(--rule); align-items: start; }
+.job h3 { margin: 0; font-size: 15px; font-weight: 400; }
+.job .when { color: var(--ink-3); font-size: 11px; margin-top: 2px; }
+.job .state { font-size: 12px; }
+.job .state b { font-weight: 400; }
+.job .state .ok { color: var(--buy); } .job .state .failed, .job .state .interrupted { color: var(--sell); }
+.job .state .running, .job .state .queued { color: var(--accent); }
+.job .state .muted { color: var(--ink-3); }
+.job ol { margin: 8px 0 0; padding: 0; list-style: none; font-size: 12px; color: var(--ink-2); }
+.job ol li { display: flex; gap: 14px; }
+.job ol li span:first-child { min-width: 260px; color: var(--ink); }
+.job .run[disabled] { opacity: .35; cursor: default; }
+.job .note { font-size: 11px; color: var(--sell); margin-top: 6px; max-width: 220px; text-align: right; }
+@media (max-width: 760px) { .job { grid-template-columns: 1fr; } .job ol li span:first-child { min-width: 0; } }
+
 /* ── key gate ─────────────────────────────────────────── */
 .gate { max-width: 520px; padding: 60px 0; }
 .gate h1 { font-weight: 300; font-size: 20px; margin: 0 0 10px; }
@@ -310,6 +328,8 @@ function renderNav() {
   $("#nav").replaceChildren(...[
     h("h6", {}, "Views"),
     PRESETS.map(p => btn(p.id, p.label)),
+    h("h6", {}, "Scheduler"),
+    btn("jobs", "Jobs"),
     h("h6", {}, "Datasets"),
     Object.keys(counts).filter(n => !presetIds.has(n)).map(n => btn(n, n, counts[n])),
     h("h6", {}, "Not served"),
@@ -323,6 +343,7 @@ const fmtCount = n => n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? Math.ro
 // ── routing ───────────────────────────────────────────
 function route() {
   const id = decodeURIComponent(location.hash.slice(1)) || "senate";
+  if (id === "jobs") { state.view = "jobs"; renderNav(); renderJobs(); return; }
   const preset = PRESETS.find(p => p.id === id);
   if (!preset && !(id in state.meta.datasets)) { location.hash = "senate"; return; }
   if (state.view !== id) { state.view = id; state.params = {}; state.offset = 0; state.sort = null; }
@@ -481,6 +502,78 @@ function table(rows, interactive) {
       } : null },
     cols.map(c => cell(c, r[c])))));
   return h("div", { class: "tablewrap" }, h("table", {}, thead, body));
+}
+
+// ── jobs ──────────────────────────────────────────────
+// GET /jobs for status, POST /jobs/{group} to start one. Polls while any run
+// is queued or running, and stops polling once you leave the view.
+let jobsTimer = null;
+const fmtTime = iso => iso ? iso.replace("T", " ") : "—";
+function fmtSecs(n) {
+  if (n === undefined || n === null) return "";
+  return n < 90 ? `${n}s` : n < 5400 ? `${Math.round(n / 60)} min` : `${(n / 3600).toFixed(1)} h`;
+}
+function elapsed(from, to) {
+  if (!from) return "";
+  const secs = Math.round(((to ? new Date(to) : new Date()) - new Date(from)) / 1000);
+  return fmtSecs(Math.max(0, secs));
+}
+
+function renderJobs() {
+  closeDrawer();
+  clearTimeout(jobsTimer);
+  $("#view").replaceChildren(
+    h("div", { class: "title" }, h("h1", {}, "Jobs"),
+      h("p", {}, "The scheduled scrapers. Run now does exactly what the schedule does — same lock, logs and snapshot refresh.")),
+    h("div", { class: "status" }, h("span", { id: "status" }), h("span")),
+    h("div", { id: "out", class: "jobs" }));
+  refreshJobs();
+}
+
+async function refreshJobs() {
+  if (state.view !== "jobs") return;
+  try {
+    const { body } = await api("/jobs");
+    $("#out").replaceChildren(...body.map(jobRow));
+    const live = body.filter(j => j.active).map(j => j.group);
+    $("#status").replaceChildren(live.length ? `running: ${live.join(", ")} · refreshing every 4s` : "idle");
+    if (live.length) jobsTimer = setTimeout(refreshJobs, 4000);
+  } catch (e) {
+    if (e.status === 401) { renderGate("The saved key was rejected — it may have been revoked."); return; }
+    $("#status").replaceChildren(h("span", { class: "err" }, `error: ${e.message}`));
+  }
+}
+
+function jobRow(j) {
+  const note = h("div", { class: "note" });
+  const button = h("button", { class: "run", disabled: j.active, onclick: async () => {
+      button.disabled = true;
+      try { await api(`/jobs/${j.group}`, { method: "POST" }); }
+      catch (e) { note.textContent = e.message; button.disabled = false; return; }
+      refreshJobs();
+    } }, j.active ? j.status : "Run now");
+
+  const status = j.status || "never run";
+  const timing = j.active
+    ? (j.status === "running" ? `started ${fmtTime(j.started_at)} · ${elapsed(j.started_at)} so far`
+                              : `queued ${fmtTime(j.queued_at)} — waiting for another job to finish`)
+    : j.finished_at ? `finished ${fmtTime(j.finished_at)} · took ${elapsed(j.started_at, j.finished_at)}`
+    : "";
+  const results = (j.results || []).map(r => h("li", {},
+    h("span", {}, r.cmd),
+    h("span", { class: r.skipped ? "" : r.running ? "" : r.exit === 0 ? "buy" : "sell" },
+      r.skipped ? `skipped — ${r.skipped}` : r.running ? "running…" : `exit ${r.exit} · ${fmtSecs(r.secs)}`)));
+  const pending = j.scripts.slice(results.length).map(cmd => h("li", {}, h("span", {}, cmd), h("span", { class: "muted" }, j.active ? "waiting" : "")));
+
+  return h("div", { class: "job" },
+    h("div", {}, h("h3", {}, j.group), h("div", { class: "when" }, j.schedule)),
+    h("div", { class: "state" },
+      h("div", {}, h("b", { class: status.replace(/ /g, "-") }, status),
+        j.trigger ? h("span", { class: "muted" }, `  · ${j.trigger === "manual" ? "run from the UI" : "scheduled"}`) : "",
+        timing ? h("span", { class: "muted" }, `  · ${timing}`) : ""),
+      h("ol", {}, results, pending),
+      j.stale && j.stale.length ? h("div", { class: "muted", style: "margin-top:6px;font-size:11px" }, `stale after this run: ${j.stale.join(", ")}`) : ""),
+    h("div", { style: "text-align:right" }, button, note));
 }
 
 // ── detail drawer ─────────────────────────────────────

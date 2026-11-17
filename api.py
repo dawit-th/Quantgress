@@ -52,9 +52,11 @@ from slowapi.util import get_remote_address
 from auth import init_db, require_key, revoke_key
 from auth import signup as auth_signup
 import health
+import run_job
 from schema import DB_PATH
 from snapshot import SNAPSHOT_PATH
 
+LOCAL_HOSTS = {"127.0.0.1", "::1", "localhost"}
 UI_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "ui.html")
 
 DEFAULT_LIMIT = 100
@@ -315,6 +317,33 @@ def ticker(symbol: str, limit: int = DEFAULT_LIMIT):
         con.close()
 
 
+# Manual job runs (the UI's "Run now"). Registered before /{dataset}, whose
+# catch-all would otherwise swallow GET /jobs.
+@router.get("/jobs")
+def jobs_route():
+    """Every schedule group: when it runs, its scripts, and its last/current
+    run's status (see run_job.read_state)."""
+    return [{"group": g, "schedule": run_job.SCHEDULE[g],
+             "scripts": [" ".join(c) for c in cmds], **run_job.read_state(g)}
+            for g, cmds in run_job.GROUPS.items()]
+
+
+@router.post("/jobs/{group}", status_code=202)
+def start_job_route(group: str, request: Request):
+    """Start a group now, exactly as the scheduler would (same lock, logs and
+    snapshot refresh). Needs a key AND a request from this machine: /signup
+    hands keys to anyone, and a key shouldn't let a stranger kick off a
+    40-minute scrape on your box."""
+    if group not in run_job.GROUPS:
+        raise HTTPException(404, f"unknown job {group!r} -- one of {', '.join(run_job.GROUPS)}")
+    if request.client is None or request.client.host not in LOCAL_HOSTS:
+        raise HTTPException(403, "jobs can only be started from the machine the API runs on")
+    state = run_job.read_state(group)
+    if state["active"]:
+        raise HTTPException(409, f"{group} is already {state['status']}")
+    return {"group": group, "status": "queued", "pid": run_job.start_detached(group)}
+
+
 @router.get("/{dataset}")
 def dataset_route(dataset: str, request: Request):
     return list_dataset(dataset, dict(request.query_params))
@@ -406,6 +435,15 @@ def selftest():
             assert r.status_code == 200 and r.json() == [], f"{name}.{col}: {r.text}"
 
     assert c.get("/not-a-real-dataset").status_code == 404
+
+    # /jobs lists every group; starting one is refused off-machine (the test
+    # client's host is "testclient") and for an unknown group -- neither
+    # case starts anything
+    r = c.get("/jobs")
+    assert r.status_code == 200 and {j["group"] for j in r.json()} == set(run_job.GROUPS), r.text
+    assert c.post("/jobs/daily").status_code == 403
+    assert c.post("/jobs/not-a-job").status_code == 404
+    assert TestClient(app).post("/jobs/daily").status_code == 401  # and it needs a key
 
     r = c.get("/politician/armstrong")
     assert r.status_code == 200, r.text
