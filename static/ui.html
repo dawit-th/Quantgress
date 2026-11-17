@@ -1,0 +1,520 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Quantgress</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500&display=swap" rel="stylesheet">
+<style>
+/* Ledger, not dashboard: paper, ink, hairline rules, one weight of type
+   doing all the work. No cards, no shadows, no rounded pills. */
+:root {
+  --paper: #f5f4ef; --paper-2: #ecebe4; --ink: #1d1d1b; --ink-2: #5c5b55;
+  --ink-3: #93918a; --rule: #d6d4cb; --accent: #2b4fd8;
+  --buy: #2e6b45; --sell: #a03a26; --warn: #a06a00;
+  --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #131312; --paper-2: #1c1c1a; --ink: #e6e4dc; --ink-2: #a3a199;
+    --ink-3: #6d6b64; --rule: #2c2c29; --accent: #8ea2ff;
+    --buy: #7fc49a; --sell: #ef9480; --warn: #e0b45c;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--paper); color: var(--ink); }
+body { font: 300 13px/1.55 var(--mono); font-variant-numeric: tabular-nums;
+       -webkit-font-smoothing: antialiased; }
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+button, input, select { font: inherit; color: inherit; }
+::selection { background: var(--ink); color: var(--paper); }
+
+/* ── masthead ─────────────────────────────────────────── */
+header { display: flex; align-items: baseline; gap: 24px; flex-wrap: wrap;
+         padding: 18px 28px 14px; border-bottom: 1px solid var(--ink); }
+.mark { font-weight: 500; letter-spacing: .32em; text-transform: uppercase; font-size: 12px; }
+.mark span { color: var(--ink-3); font-weight: 300; letter-spacing: .08em; text-transform: none; margin-left: 10px; }
+.meta { color: var(--ink-2); font-size: 11.5px; }
+.meta b { font-weight: 400; color: var(--ink); }
+.spacer { flex: 1; }
+.keybox { display: flex; gap: 8px; align-items: baseline; font-size: 11.5px; color: var(--ink-2); }
+.keybox code { color: var(--ink); }
+
+/* ── freshness strip ──────────────────────────────────── */
+.fresh { display: flex; gap: 0; overflow-x: auto; border-bottom: 1px solid var(--rule);
+         font-size: 11px; color: var(--ink-2); scrollbar-width: none; }
+.fresh div { padding: 7px 14px; border-right: 1px solid var(--rule); white-space: nowrap; }
+.fresh div:first-child { padding-left: 28px; }
+.fresh i { font-style: normal; display: inline-block; width: 6px; height: 6px; margin-right: 7px;
+           vertical-align: 1px; background: var(--ink-3); }
+.fresh .ok i { background: var(--buy); }
+.fresh .stale i, .fresh .empty i, .fresh .missing i { background: var(--sell); }
+.fresh .unscheduled { color: var(--ink-3); }
+
+/* ── layout ───────────────────────────────────────────── */
+main { display: grid; grid-template-columns: 220px minmax(0, 1fr); min-height: calc(100vh - 92px); }
+nav { border-right: 1px solid var(--rule); padding: 18px 0 40px; }
+nav h6 { margin: 18px 28px 6px; font-size: 10px; font-weight: 400; letter-spacing: .24em;
+         text-transform: uppercase; color: var(--ink-3); }
+nav h6:first-child { margin-top: 0; }
+nav button { display: flex; justify-content: space-between; width: 100%; padding: 3px 18px 3px 28px;
+             background: none; border: 0; cursor: pointer; text-align: left; color: var(--ink-2); }
+nav button:hover { color: var(--ink); background: var(--paper-2); }
+nav button[aria-current="true"] { color: var(--ink); font-weight: 400; }
+nav button[aria-current="true"]::before { content: "›"; position: absolute; margin-left: -14px; color: var(--accent); }
+nav button small { color: var(--ink-3); font-size: 10.5px; }
+section { padding: 22px 28px 60px; min-width: 0; }
+
+/* ── query line ───────────────────────────────────────── */
+.title { display: flex; align-items: baseline; gap: 14px; margin-bottom: 4px; }
+.title h1 { margin: 0; font-size: 20px; font-weight: 300; letter-spacing: -.01em; }
+.title p { margin: 0; color: var(--ink-3); font-size: 11.5px; }
+form.q { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 4px 18px;
+         padding: 14px 0 16px; border-bottom: 1px solid var(--rule); }
+form.q label { display: flex; flex-direction: column; font-size: 10px; letter-spacing: .14em;
+               text-transform: uppercase; color: var(--ink-3); }
+form.q label em { font-style: normal; letter-spacing: 0; text-transform: none; color: var(--ink-3); opacity: .7; }
+form.q input, form.q select { margin-top: 3px; padding: 3px 0; min-width: 120px; background: transparent;
+         border: 0; border-bottom: 1px solid var(--ink-3); border-radius: 0; outline: none; font-size: 13px; }
+form.q input:focus, form.q select:focus { border-bottom-color: var(--accent); }
+form.q input::placeholder { color: var(--ink-3); opacity: .6; }
+.run { padding: 4px 14px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper);
+       cursor: pointer; letter-spacing: .1em; text-transform: uppercase; font-size: 11px; font-weight: 400; }
+.run:hover { background: transparent; color: var(--ink); }
+.ghost { padding: 4px 10px; border: 1px solid var(--rule); background: transparent; cursor: pointer;
+         font-size: 11px; color: var(--ink-2); }
+.ghost:hover { border-color: var(--ink); color: var(--ink); }
+
+.curl { display: flex; gap: 10px; align-items: baseline; margin: 12px 0 0; font-size: 11.5px; color: var(--ink-2); }
+.curl code { flex: 1; overflow-x: auto; white-space: nowrap; color: var(--ink); scrollbar-width: thin; }
+.curl code::before { content: "$ "; color: var(--ink-3); }
+
+.status { display: flex; justify-content: space-between; gap: 12px; margin: 18px 0 8px;
+          font-size: 11.5px; color: var(--ink-2); }
+.status .err { color: var(--sell); }
+.pager { display: flex; gap: 6px; }
+
+/* ── table ────────────────────────────────────────────── */
+.tablewrap { overflow-x: auto; border-top: 1px solid var(--ink); }
+table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+th { position: sticky; top: 0; background: var(--paper); text-align: left; font-weight: 400;
+     font-size: 10px; letter-spacing: .14em; text-transform: uppercase; color: var(--ink-3);
+     padding: 8px 14px 7px 0; border-bottom: 1px solid var(--rule); white-space: nowrap; cursor: pointer; user-select: none; }
+th:hover { color: var(--ink); }
+th.sorted { color: var(--ink); }
+td { padding: 5px 14px 5px 0; border-bottom: 1px solid var(--rule); white-space: nowrap;
+     max-width: 360px; overflow: hidden; text-overflow: ellipsis; vertical-align: top; }
+td.num, th.num { text-align: right; }
+td.nil { color: var(--ink-3); }
+tbody tr { cursor: pointer; }
+tbody tr:hover td { background: var(--paper-2); }
+tbody tr[aria-selected="true"] td { background: var(--paper-2); box-shadow: inset 0 -1px var(--ink); }
+.buy { color: var(--buy); } .sell { color: var(--sell); }
+.tkr { font-weight: 500; letter-spacing: .02em; }
+.empty-state { padding: 48px 0; color: var(--ink-3); }
+
+.summary { margin: 4px 0 22px; }
+.summary h2, aside h2 { font-size: 10px; font-weight: 400; letter-spacing: .24em; text-transform: uppercase;
+             color: var(--ink-3); margin: 18px 0 6px; }
+
+/* ── detail drawer ────────────────────────────────────── */
+aside { position: fixed; top: 0; right: 0; bottom: 0; width: min(440px, 100vw); overflow-y: auto;
+        background: var(--paper); border-left: 1px solid var(--ink); padding: 20px 24px 40px;
+        transform: translateX(100%); transition: transform .18s ease; z-index: 5; }
+aside.open { transform: none; }
+aside .close { float: right; }
+aside dl { display: grid; grid-template-columns: max-content 1fr; gap: 3px 16px; margin: 0; font-size: 12px; }
+aside dt { color: var(--ink-3); }
+aside dd { margin: 0; word-break: break-word; }
+aside .legend { margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--rule); color: var(--ink-2); font-size: 11.5px; }
+aside .legend p { margin: 0 0 6px; }
+
+/* ── key gate ─────────────────────────────────────────── */
+.gate { max-width: 520px; padding: 60px 0; }
+.gate h1 { font-weight: 300; font-size: 20px; margin: 0 0 10px; }
+.gate p { color: var(--ink-2); }
+.gate .row { display: flex; gap: 10px; margin: 14px 0 26px; }
+.gate input { flex: 1; padding: 5px 0; background: transparent; border: 0; border-bottom: 1px solid var(--ink-3); outline: none; }
+.gate input:focus { border-bottom-color: var(--accent); }
+.gate pre { white-space: pre-wrap; color: var(--ink); background: var(--paper-2); padding: 10px 12px; }
+
+@media (max-width: 760px) {
+  header, .fresh div:first-child { padding-left: 16px; padding-right: 16px; }
+  main { grid-template-columns: 1fr; }
+  nav { border-right: 0; border-bottom: 1px solid var(--rule); padding: 10px 0; display: flex; flex-wrap: wrap; }
+  nav h6 { width: 100%; margin: 8px 16px 2px; }
+  nav button { width: auto; padding: 3px 16px; }
+  section { padding: 18px 16px 60px; }
+}
+</style>
+</head>
+<body>
+<header>
+  <div class="mark">Quantgress<span>local disclosure ledger</span></div>
+  <div class="meta" id="meta">—</div>
+  <div class="spacer"></div>
+  <div class="keybox" id="keybox"></div>
+</header>
+<div class="fresh" id="fresh" aria-label="dataset freshness"></div>
+<main>
+  <nav id="nav" aria-label="views"></nav>
+  <section id="view"></section>
+</main>
+<aside id="drawer" aria-label="row detail"></aside>
+
+<script>
+"use strict";
+// Same origin as the API, so no CORS and no base URL to configure.
+const API = location.origin;
+const $ = (sel, el = document) => el.querySelector(sel);
+const h = (tag, attrs = {}, ...kids) => {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") el.className = v;
+    else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else if (v !== undefined && v !== null && v !== false) el.setAttribute(k, v === true ? "" : v);
+  }
+  for (const kid of kids.flat()) if (kid !== null && kid !== undefined)
+    el.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
+  return el;
+};
+
+// localStorage can be unavailable (private window); the key then lives for the tab only.
+const store = {
+  get(k) { try { return localStorage.getItem(k); } catch { return this[k] || null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch { this[k] = v; } },
+  del(k) { try { localStorage.removeItem(k); } catch { delete this[k]; } },
+};
+
+const state = { key: store.get("qg_key"), meta: null, view: null, params: {}, offset: 0,
+                rows: [], sort: null, selected: null };
+
+// Views: presets over the generic /{dataset} route, then the two named lookups.
+const PRESETS = [
+  { id: "senate", label: "Senate trades", dataset: "trades", fixed: { chamber: "S" },
+    blurb: "Periodic transaction reports, efdsearch.senate.gov" },
+  { id: "house", label: "House trades", dataset: "trades", fixed: { chamber: "H" },
+    blurb: "Periodic transaction reports, disclosures-clerk.house.gov" },
+  { id: "insider-buys", label: "Insider buys", dataset: "insiders", fixed: { trans_code: "P" },
+    blurb: "Form 4 open-market purchases — the strongest insider signal" },
+  { id: "insider-sales", label: "Insider sales", dataset: "insiders", fixed: { trans_code: "S" },
+    blurb: "Form 4 open-market sales — often pre-scheduled 10b5-1 plans" },
+  { id: "politician", label: "Politician", named: "politician",
+    blurb: "Every trade by one member, both chambers" },
+  { id: "ticker", label: "Ticker", named: "ticker",
+    blurb: "Everyone in Congress who traded one symbol" },
+];
+
+const LEGEND = {
+  trans_code: { P: "open-market purchase", S: "open-market sale", A: "grant / award from the company",
+    M: "option exercise", F: "shares withheld for tax on vesting", D: "disposed back to the issuer",
+    G: "gift", C: "conversion of a derivative", X: "in-the-money option exercise",
+    J: "other (see footnotes)", L: "small acquisition" },
+  acquired_disposed: { A: "acquired — share count went up", D: "disposed — share count went down" },
+  chamber: { S: "Senate", H: "House" },
+};
+const NUMERIC = /^(amount_|shares|price|value|total|count|mention|lag_days|award|txns|tickers|short_|cycle|fiscal_year|filing_year|rank)/;
+
+// ── API ───────────────────────────────────────────────
+async function api(path, opts = {}) {
+  const t0 = performance.now();
+  const res = await fetch(API + path, { ...opts, headers: { ...(opts.headers || {}),
+    ...(state.key ? { "X-API-Key": state.key } : {}) } });
+  const ms = Math.round(performance.now() - t0);
+  let body = null;
+  try { body = await res.json(); } catch { /* non-JSON error page */ }
+  if (!res.ok) {
+    const err = new Error((body && body.detail) || res.statusText || `HTTP ${res.status}`);
+    err.status = res.status;
+    throw err;
+  }
+  return { body, ms };
+}
+
+// ── masthead + freshness ───────────────────────────────
+async function loadHealth() {
+  const fresh = $("#fresh");
+  try {
+    const { body } = await api("/health");
+    fresh.replaceChildren(...body.datasets.map(d => h("div", {
+        class: d.status, title: `${d.dataset}: ${d.status}` +
+          (d.max_age_days ? ` (max ${d.max_age_days} days)` : "") },
+      h("i"), d.dataset.replace(/_/g, " "), " ",
+      h("span", {}, d.latest ? `${d.latest} · ${d.age_days}d` : d.status))));
+    $("#meta").replaceChildren(
+      "serving ", h("b", {}, body.serving),
+      body.snapshot_taken ? ` · snapshot ${body.snapshot_taken.replace("T", " ")}` : "",
+      " · ", h("b", {}, body.status));
+  } catch (e) {
+    fresh.replaceChildren(h("div", { class: "stale" }, h("i"), `health unavailable: ${e.message}`));
+  }
+}
+
+function renderKeybox() {
+  const box = $("#keybox");
+  if (!state.key) { box.replaceChildren("no key"); return; }
+  box.replaceChildren("key ", h("code", {}, state.key.slice(0, 12) + "…"),
+    h("button", { class: "ghost", onclick: () => { store.del("qg_key"); state.key = null; boot(); } }, "forget"));
+}
+
+// ── key gate ──────────────────────────────────────────
+function renderGate(message) {
+  $("#nav").replaceChildren();
+  const keyIn = h("input", { placeholder: "qg_live_…", "aria-label": "API key", autocomplete: "off" });
+  const mailIn = h("input", { placeholder: "you@example.com", type: "email", "aria-label": "email" });
+  const out = h("div");
+  const useKey = async (k) => {
+    state.key = k.trim(); store.set("qg_key", state.key);
+    try { await loadMeta(); renderKeybox(); route(); }
+    catch (e) { state.key = null; store.del("qg_key"); renderGate(`That key didn't work: ${e.message}`); }
+  };
+  $("#view").replaceChildren(h("div", { class: "gate" },
+    h("h1", {}, "An API key, first"),
+    h("p", {}, message || "Every data route needs one. It stays in this browser only."),
+    h("div", { class: "row" }, keyIn,
+      h("button", { class: "run", onclick: () => keyIn.value && useKey(keyIn.value) }, "Use key")),
+    h("p", {}, "No key yet? Issue one locally:"),
+    h("pre", {}, ".venv/bin/python auth.py issue you@example.com"),
+    h("p", {}, "or sign up here (one active key per email):"),
+    h("div", { class: "row" }, mailIn,
+      h("button", { class: "ghost", onclick: async () => {
+        try {
+          const { body } = await api("/signup", { method: "POST",
+            headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: mailIn.value }) });
+          out.replaceChildren(h("p", {}, "Your key — shown once, save it:"), h("pre", {}, body.api_key));
+          useKey(body.api_key);
+        } catch (e) { out.replaceChildren(h("p", { class: "sell" }, e.message)); }
+      } }, "Sign up")),
+    out));
+  keyIn.addEventListener("keydown", e => e.key === "Enter" && keyIn.value && useKey(keyIn.value));
+  keyIn.focus();
+}
+
+// ── nav ───────────────────────────────────────────────
+async function loadMeta() {
+  const { body } = await api("/");
+  state.meta = body;
+}
+
+function renderNav() {
+  const counts = state.meta.datasets;
+  const btn = (id, label, count) => h("button", {
+      "aria-current": state.view === id ? "true" : "false",
+      onclick: () => { location.hash = id; } },
+    h("span", {}, label), count !== undefined ? h("small", {}, fmtCount(count)) : null);
+  const presetIds = new Set(["trades"]);
+  // replaceChildren stringifies arrays (only h() flattens), so spread a flat list
+  $("#nav").replaceChildren(...[
+    h("h6", {}, "Views"),
+    PRESETS.map(p => btn(p.id, p.label)),
+    h("h6", {}, "Datasets"),
+    Object.keys(counts).filter(n => !presetIds.has(n)).map(n => btn(n, n, counts[n])),
+    h("h6", {}, "Not served"),
+    h("button", { disabled: true, title: "FINRA's terms bar redistributing it — query locally with q.py" },
+      h("span", {}, "short-volume"), h("small", {}, "local")),
+  ].flat());
+}
+
+const fmtCount = n => n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? Math.round(n / 1e3) + "k" : String(n);
+
+// ── routing ───────────────────────────────────────────
+function route() {
+  const id = decodeURIComponent(location.hash.slice(1)) || "senate";
+  const preset = PRESETS.find(p => p.id === id);
+  if (!preset && !(id in state.meta.datasets)) { location.hash = "senate"; return; }
+  if (state.view !== id) { state.view = id; state.params = {}; state.offset = 0; state.sort = null; }
+  renderNav();
+  renderQuery(preset || { id, label: id, dataset: id, fixed: {} });
+}
+window.addEventListener("hashchange", () => state.meta && route());
+
+// ── query form ────────────────────────────────────────
+function renderQuery(v) {
+  closeDrawer();
+  const fields = v.named
+    ? [{ column: v.named === "politician" ? "name" : "symbol", match: v.named === "politician" ? "ilike" : "eq_ci" }]
+    : (state.meta.filters[v.dataset] || []).filter(f => !(f.column in v.fixed));
+  const matchHint = { eq: "exact", eq_ci: "exact, any case", ilike: "contains" };
+  const inputs = fields.map(f => {
+    const input = h("input", { name: f.column, value: state.params[f.column] || "", autocomplete: "off",
+      placeholder: f.column === "name" ? "pelosi" : f.column === "symbol" ? "NVDA" : "" });
+    return h("label", {}, h("span", {}, f.column.replace(/_/g, " "), " ", h("em", {}, matchHint[f.match] || "")), input);
+  });
+  const limitSel = h("select", { name: "limit", "aria-label": "rows per page" },
+    [25, 100, 250, 1000].map(n => h("option", { value: n, selected: (state.params.limit || "100") == n }, n)));
+  const form = h("form", { class: "q", onsubmit: e => {
+      e.preventDefault();
+      state.params = Object.fromEntries([...new FormData(form)].filter(([, val]) => val !== ""));
+      state.offset = 0;
+      run(v);
+    } },
+    inputs, h("label", {}, h("span", {}, "rows"), limitSel),
+    h("button", { class: "run", type: "submit" }, "Run"));
+
+  $("#view").replaceChildren(
+    h("div", { class: "title" }, h("h1", {}, v.label), h("p", {}, v.blurb || datasetBlurb(v.dataset))),
+    form,
+    h("div", { class: "curl" }, h("code", { id: "curl" }),
+      h("button", { class: "ghost", type: "button", onclick: copyCurl }, "copy")),
+    h("div", { class: "status" }, h("span", { id: "status" }), h("span", { class: "pager", id: "pager" })),
+    h("div", { id: "out" }));
+  (inputs[0] && $("input", inputs[0]))?.focus();
+  if (!v.named || state.params[fields[0].column]) run(v);
+  else { setCurl(v); $("#out").replaceChildren(h("p", { class: "empty-state" }, `Type a ${fields[0].column} and press Enter.`)); }
+}
+
+function datasetBlurb(name) {
+  const n = state.meta.datasets[name];
+  return n === undefined ? "" : `${n.toLocaleString()} rows`;
+}
+
+function requestPath(v) {
+  const limit = state.params.limit || "100";
+  if (v.named) {
+    const arg = state.params[v.named === "politician" ? "name" : "symbol"] || "";
+    return `/${v.named}/${encodeURIComponent(arg)}?limit=${limit}`;
+  }
+  const q = new URLSearchParams({ ...v.fixed, ...state.params, limit, offset: String(state.offset) });
+  return `/${v.dataset}?${q}`;
+}
+
+function setCurl(v) {
+  $("#curl").textContent = `curl -H "X-API-Key: $QG_KEY" "${API}${requestPath(v)}"`;
+}
+function copyCurl(e) {
+  const text = $("#curl").textContent;
+  navigator.clipboard?.writeText(text).then(() => {
+    e.target.textContent = "copied"; setTimeout(() => (e.target.textContent = "copy"), 1200);
+  });
+}
+
+// ── run + render ──────────────────────────────────────
+async function run(v) {
+  setCurl(v);
+  const status = $("#status");
+  status.replaceChildren("…");
+  $("#pager").replaceChildren();
+  try {
+    const { body, ms } = await api(requestPath(v));
+    let rows = body, summary = null;
+    if (v.named === "politician") { rows = body.trades; summary = body.summary; }
+    state.rows = rows; state.selected = null;
+    const limit = Number(state.params.limit || 100);
+    status.replaceChildren(`${rows.length.toLocaleString()} row${rows.length === 1 ? "" : "s"}`,
+      v.named ? "" : ` · from ${state.offset + 1}`, ` · ${ms} ms`);
+    if (!v.named) {
+      $("#pager").replaceChildren(
+        h("button", { class: "ghost", disabled: state.offset === 0,
+          onclick: () => { state.offset = Math.max(0, state.offset - limit); run(v); } }, "← prev"),
+        h("button", { class: "ghost", disabled: rows.length < limit,
+          onclick: () => { state.offset += limit; run(v); } }, "next →"));
+    }
+    $("#out").replaceChildren(
+      summary ? h("div", { class: "summary" }, h("h2", {}, "Summary"), table(summary, false)) : "",
+      summary ? h("div", { class: "summary" }, h("h2", {}, "Trades")) : "",
+      rows.length ? table(rows, true) : h("p", { class: "empty-state" }, "No rows match."));
+  } catch (e) {
+    if (e.status === 401) { renderGate("The saved key was rejected — it may have been revoked."); return; }
+    status.replaceChildren(h("span", { class: "err" }, e.status === 404 ? e.message : `error: ${e.message}`));
+    $("#out").replaceChildren();
+  }
+}
+
+function sortRows(rows) {
+  if (!state.sort) return rows;
+  const { col, dir } = state.sort;
+  return [...rows].sort((a, b) => {
+    const x = a[col], y = b[col];
+    if (x === y) return 0;
+    if (x === null || x === undefined) return 1;
+    if (y === null || y === undefined) return -1;
+    return (x < y ? -1 : 1) * dir;
+  });
+}
+
+function cell(col, val) {
+  if (val === null || val === undefined || val === "") return h("td", { class: "nil" }, "·");
+  const isNum = typeof val === "number";
+  let cls = isNum || NUMERIC.test(col) ? "num" : "";
+  let text = isNum ? (Number.isInteger(val) && !/year|cycle/.test(col) ? val.toLocaleString()
+                      : /year|cycle/.test(col) ? String(val) : val.toLocaleString(undefined, { maximumFractionDigits: 4 }))
+                   : String(val);
+  if (typeof val === "boolean") text = val ? "yes" : "no";
+  if (col === "tkr" || col === "ticker" || col === "symbol") cls += " tkr";
+  const v = String(val);
+  if ((col === "trans_code" && v === "P") || (col === "acquired_disposed" && v === "A") || /^Purchase/.test(v) && col === "tx_type") cls += " buy";
+  if ((col === "trans_code" && v === "S") || (col === "acquired_disposed" && v === "D") || /^Sale/.test(v) && col === "tx_type") cls += " sell";
+  return h("td", { class: cls.trim(), title: text.length > 40 ? text : null }, text);
+}
+
+// The API returns columns in table order, which leads with IDs (accession
+// numbers, CIKs). Put what a reader scans for first, IDs and provenance last;
+// everything else keeps its order in between. The drawer still shows all.
+const FIRST = ["chamber", "last_name", "tkr", "ticker", "symbol", "owner_name", "issuer_name",
+  "trans_code", "acquired_disposed", "tx_type", "shares", "price_per_share", "amount_low", "amount_high",
+  "shares_owned_following", "txn_date", "trans_date", "filed_date"];
+const LAST = /^(accession_number|trans_seq|issuer_cik|owner_cik|cik|link|office|first_name|.*_guess_how|tkr_recovered|sub_id|generated_internal_id|filing_uuid)$/;
+function orderColumns(cols) {
+  const first = FIRST.filter(c => cols.includes(c));
+  const last = cols.filter(c => LAST.test(c) && !first.includes(c));
+  return [...first, ...cols.filter(c => !first.includes(c) && !last.includes(c)), ...last];
+}
+
+function table(rows, interactive) {
+  const cols = orderColumns(Object.keys(rows[0]));
+  const thead = h("thead", {}, h("tr", {}, cols.map(c => h("th", {
+      class: [NUMERIC.test(c) || typeof rows[0][c] === "number" ? "num" : "", state.sort?.col === c ? "sorted" : ""].join(" ").trim(),
+      onclick: interactive ? () => {
+        state.sort = state.sort?.col === c ? { col: c, dir: -state.sort.dir } : { col: c, dir: 1 };
+        const fresh = table(rows, true);
+        $(".tablewrap:last-of-type", $("#out"))?.replaceWith(fresh);
+      } : null },
+    c.replace(/_/g, " "), state.sort?.col === c && interactive ? (state.sort.dir > 0 ? " ↑" : " ↓") : ""))));
+  const body = h("tbody", {}, sortRows(rows).map(r => h("tr", {
+      onclick: interactive ? (e) => {
+        document.querySelectorAll("tbody tr[aria-selected]").forEach(t => t.removeAttribute("aria-selected"));
+        e.currentTarget.setAttribute("aria-selected", "true");
+        openDrawer(r);
+      } : null },
+    cols.map(c => cell(c, r[c])))));
+  return h("div", { class: "tablewrap" }, h("table", {}, thead, body));
+}
+
+// ── detail drawer ─────────────────────────────────────
+function openDrawer(row) {
+  const notes = [];
+  for (const [col, codes] of Object.entries(LEGEND))
+    if (row[col] && codes[row[col]]) notes.push(h("p", {}, h("b", {}, `${col.replace(/_/g, " ")} ${row[col]}`), ` — ${codes[row[col]]}`));
+  if (row.trans_seq !== undefined)
+    notes.push(h("p", {}, h("b", {}, `trans seq ${row.trans_seq}`), " — position of this transaction within its filing (0 = first)"));
+  const links = [];
+  if (row.link && row.chamber === "S") links.push(h("a", { href: "https://efdsearch.senate.gov" + row.link, target: "_blank", rel: "noopener" }, "original filing ↗"));
+  if (row.accession_number && row.issuer_cik)
+    links.push(h("a", { href: `https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=${encodeURIComponent(row.issuer_cik)}&type=4`, target: "_blank", rel: "noopener" }, "issuer's Form 4s on EDGAR ↗"));
+  const d = $("#drawer");
+  d.replaceChildren(
+    h("button", { class: "ghost close", onclick: closeDrawer }, "close  esc"),
+    h("h2", {}, "Row"),
+    h("dl", {}, Object.entries(row).flatMap(([k, v]) => [h("dt", {}, k), h("dd", {}, v === null ? "·" : String(v))])),
+    notes.length ? h("div", { class: "legend" }, notes) : "",
+    links.length ? h("div", { class: "legend" }, links.map(a => h("p", {}, a))) : "");
+  d.classList.add("open");
+}
+function closeDrawer() { $("#drawer").classList.remove("open"); }
+document.addEventListener("keydown", e => e.key === "Escape" && closeDrawer());
+
+// ── boot ──────────────────────────────────────────────
+async function boot() {
+  renderKeybox();
+  loadHealth();
+  if (!state.key) { renderGate(); return; }
+  try { await loadMeta(); route(); }
+  catch (e) { renderGate(e.status === 401 ? "The saved key was rejected — it may have been revoked." : `Couldn't reach the API: ${e.message}`); }
+}
+boot();
+</script>
+</body>
+</html>

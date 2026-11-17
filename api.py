@@ -36,9 +36,13 @@ eq filters are exact (digit strings are coerced to int for the integer
 columns -- filing_year, cycle, fiscal_year, cik).
 """
 
+import os
+from datetime import datetime
+
 import duckdb
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -47,8 +51,12 @@ from slowapi.util import get_remote_address
 
 from auth import init_db, require_key, revoke_key
 from auth import signup as auth_signup
+import health
+from schema import DB_PATH
+from snapshot import SNAPSHOT_PATH
 
-DB_PATH = "congress_trades.duckdb"
+UI_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "ui.html")
+
 DEFAULT_LIMIT = 100
 MAX_LIMIT = 1000
 # ponytail: one limit for everyone, no tier differentiation -- auth.py already
@@ -89,7 +97,7 @@ router = APIRouter(dependencies=[Depends(require_key)])
 RELATIONS = {
     "trades": ("trades", [
         ("chamber", "eq"), ("tkr", "eq_ci"), ("last_name", "ilike"),
-        ("tx_type", "eq_ci"), ("asset_type", "eq_ci"),
+        ("tx_type", "eq_ci"), ("asset_type", "eq_ci"), ("date_suspect", "eq"),
     ], "txn_date DESC"),
     "lobbying": ("lobbying_filings", [
         ("client_name", "ilike"), ("registrant_name", "ilike"),
@@ -180,8 +188,18 @@ RELATIONS = {
 }
 
 
+def data_db_path():
+    """Which file requests read, decided per request rather than at import,
+    so a snapshot that first appears after the server started gets picked
+    up: QG_API_DB if set, else snapshot.py's read-only copy (never locked by
+    a scraper), else the live file (e.g. before the first snapshot)."""
+    if os.environ.get("QG_API_DB"):
+        return os.environ["QG_API_DB"]
+    return SNAPSHOT_PATH if os.path.exists(SNAPSHOT_PATH) else DB_PATH
+
+
 def _connect():
-    return duckdb.connect(DB_PATH, read_only=True)
+    return duckdb.connect(data_db_path(), read_only=True)
 
 
 def _rows(con, sql, params):
@@ -192,7 +210,10 @@ def _rows(con, sql, params):
 
 def _coerce(val):
     """Digit-only query strings become int, so eq filters on INTEGER/BIGINT
-    columns (filing_year, cycle, fiscal_year, cik) don't need a cast in SQL."""
+    columns (filing_year, cycle, fiscal_year, cik) don't need a cast in SQL;
+    true/false become bool for BOOLEAN columns (trades.date_suspect)."""
+    if val.lower() in ("true", "false"):
+        return val.lower() == "true"
     return int(val) if val.isdigit() else val
 
 
@@ -247,6 +268,10 @@ def root():
         counts = {name: con.execute(f"SELECT count(*) FROM {rel}").fetchone()[0]
                   for name, (rel, _, _) in RELATIONS.items()}
         return {"datasets": counts,
+                # filter columns per dataset, so a client (ui.html) can build
+                # its query form from RELATIONS instead of a copy of it
+                "filters": {name: [{"column": col, "match": mode} for col, mode in filters]
+                            for name, (_, filters, _) in RELATIONS.items()},
                 "usage": "GET /{dataset}?<filter col>=<value>&limit=100&offset=0",
                 "named_routes": ["/trades", "/politician/{name}", "/ticker/{symbol}"]}
     finally:
@@ -295,6 +320,33 @@ def dataset_route(dataset: str, request: Request):
     return list_dataset(dataset, dict(request.query_params))
 
 
+# Public routes, registered before the router: its catch-all /{dataset}
+# would otherwise match /health and /ui and demand a key.
+@app.get("/health")
+def health_route(response: Response):
+    """Freshness of every scheduled dataset (see health.py). Public: it
+    exposes dates and ages only, so a monitor can poll it without a key.
+    "degraded" means at least one scheduled dataset is stale or empty."""
+    con = _connect()
+    try:
+        rows = health.check(con)
+    finally:
+        con.close()
+    bad = [r["dataset"] for r in rows if r["status"] in ("stale", "empty", "missing")]
+    return {"status": "degraded" if bad else "ok", "not_ok": bad,
+            "serving": os.path.basename(data_db_path()),
+            "snapshot_taken": (datetime.fromtimestamp(os.path.getmtime(SNAPSHOT_PATH)).isoformat(timespec="seconds")
+                               if os.path.exists(SNAPSHOT_PATH) else None),
+            "datasets": rows}
+
+
+@app.get("/ui", include_in_schema=False)
+def ui_route():
+    """The browser UI -- a single static page that calls this same API with
+    the key the user pastes in (kept in their browser's localStorage)."""
+    return FileResponse(UI_PATH, media_type="text/html")
+
+
 app.include_router(router)
 
 
@@ -322,8 +374,15 @@ def selftest():
     """Offline route checks against the real DB file, no server process --
     fails loudly if a RELATIONS entry names a column/relation that doesn't
     exist, or if the routing/filter/pagination logic breaks."""
+    import tempfile
+
+    import auth
     from fastapi.testclient import TestClient
     from auth import issue_key
+
+    # keys go to a throwaway auth DB, not the real one
+    auth.AUTH_DB_PATH = os.path.join(tempfile.mkdtemp(), "auth.duckdb")
+    auth.init_db()
 
     c = TestClient(app, headers={"X-API-Key": issue_key("api-selftest@example.com")})
 

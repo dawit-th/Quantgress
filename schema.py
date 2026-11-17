@@ -39,6 +39,11 @@ def _select(table, chamber):
             -- secondary columns: filtering, auditing, provenance
             asset_type, owner,
             ticker IS NULL AND ticker_guess IS NOT NULL AS tkr_recovered,
+            -- a trade dated after the report it's on is a typo in the filing
+            -- (e.g. 12/26/2026 on a February report, meaning 2025). Kept as
+            -- filed; flagged so "latest trade" queries can drop it.
+            coalesce(try_strptime(tx_date, '%m/%d/%Y')::DATE
+                     > try_strptime(filed, '%m/%d/%Y')::DATE, false) AS date_suspect,
             first_name, office, link
         FROM {table}"""
 
