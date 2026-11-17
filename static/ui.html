@@ -81,6 +81,8 @@ form.q input, form.q select { margin-top: 3px; padding: 3px 0; min-width: 120px;
          border: 0; border-bottom: 1px solid var(--ink-3); border-radius: 0; outline: none; font-size: 13px; }
 form.q input:focus, form.q select:focus { border-bottom-color: var(--accent); }
 form.q input::placeholder { color: var(--ink-3); opacity: .6; }
+.req { color: var(--sell); font-weight: 500; letter-spacing: 0; }
+.reqnote { align-self: flex-end; padding-bottom: 6px; font-size: 11px; color: var(--ink-3); }
 .run { padding: 4px 14px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper);
        cursor: pointer; letter-spacing: .1em; text-transform: uppercase; font-size: 11px; font-weight: 400; }
 .run:hover { background: transparent; color: var(--ink); }
@@ -355,14 +357,24 @@ window.addEventListener("hashchange", () => state.meta && route());
 // ── query form ────────────────────────────────────────
 function renderQuery(v) {
   closeDrawer();
+  // Politician/Ticker lookups need their one field (marked *); every filter on
+  // a dataset view (Senate, House, insiders, ...) is optional -- blank = latest.
   const fields = v.named
-    ? [{ column: v.named === "politician" ? "name" : "symbol", match: v.named === "politician" ? "ilike" : "eq_ci" }]
+    ? [{ column: v.named === "politician" ? "name" : "symbol", match: v.named === "politician" ? "ilike" : "eq_ci", required: true }]
     : (state.meta.filters[v.dataset] || []).filter(f => !(f.column in v.fixed));
   const matchHint = { eq: "exact", eq_ci: "exact, any case", ilike: "contains" };
   const inputs = fields.map(f => {
-    const input = h("input", { name: f.column, value: state.params[f.column] || "", autocomplete: "off",
-      placeholder: f.column === "name" ? "pelosi" : f.column === "symbol" ? "NVDA" : "" });
-    return h("label", {}, h("span", {}, f.column.replace(/_/g, " "), " ", h("em", {}, matchHint[f.match] || "")), input);
+    // a yes/no flag gets a dropdown, not a box you'd have to type "true" into
+    const input = f.column === "date_suspect"
+      ? h("select", { name: f.column, title: "trade dated after its own filing — a typo in the source" },
+          [["", "any"], ["false", "no"], ["true", "yes"]].map(([val, label]) =>
+            h("option", { value: val, selected: (state.params[f.column] || "") === val }, label)))
+      : h("input", { name: f.column, value: state.params[f.column] || "", autocomplete: "off",
+          required: f.required, "aria-required": f.required ? "true" : null,
+          placeholder: f.column === "name" ? "pelosi" : f.column === "symbol" ? "NVDA" : "" });
+    return h("label", {}, h("span", {}, f.column.replace(/_/g, " "),
+      f.required ? h("b", { class: "req", title: "required" }, " *") : "",
+      " ", h("em", {}, matchHint[f.match] || "")), input);
   });
   const limitSel = h("select", { name: "limit", "aria-label": "rows per page" },
     [25, 100, 250, 1000].map(n => h("option", { value: n, selected: (state.params.limit || "100") == n }, n)));
@@ -373,7 +385,10 @@ function renderQuery(v) {
       run(v);
     } },
     inputs, h("label", {}, h("span", {}, "rows"), limitSel),
-    h("button", { class: "run", type: "submit" }, "Run"));
+    h("button", { class: "run", type: "submit" }, "Run"),
+    h("span", { class: "reqnote" }, fields.some(f => f.required)
+      ? h("span", {}, h("b", { class: "req" }, "*"), " required")
+      : "all fields optional — leave blank for the latest"));
 
   $("#view").replaceChildren(
     h("div", { class: "title" }, h("h1", {}, v.label), h("p", {}, v.blurb || datasetBlurb(v.dataset))),
@@ -464,7 +479,7 @@ function cell(col, val) {
                       : /year|cycle/.test(col) ? String(val) : val.toLocaleString(undefined, { maximumFractionDigits: 4 }))
                    : String(val);
   if (typeof val === "boolean") text = val ? "yes" : "no";
-  if (col === "tkr" || col === "ticker" || col === "symbol") cls += " tkr";
+  if (col === "tkr" || col === "ticker" || col === "ticker_guess" || col === "symbol") cls += " tkr";
   const v = String(val);
   if ((col === "trans_code" && v === "P") || (col === "acquired_disposed" && v === "A") || /^Purchase/.test(v) && col === "tx_type") cls += " buy";
   if ((col === "trans_code" && v === "S") || (col === "acquired_disposed" && v === "D") || /^Sale/.test(v) && col === "tx_type") cls += " sell";
@@ -474,10 +489,10 @@ function cell(col, val) {
 // The API returns columns in table order, which leads with IDs (accession
 // numbers, CIKs). Put what a reader scans for first, IDs and provenance last;
 // everything else keeps its order in between. The drawer still shows all.
-const FIRST = ["chamber", "last_name", "tkr", "ticker", "symbol", "owner_name", "issuer_name",
+const FIRST = ["chamber", "last_name", "tkr", "ticker", "ticker_guess", "symbol", "owner_name", "issuer_name",
   "trans_code", "acquired_disposed", "tx_type", "shares", "price_per_share", "amount_low", "amount_high",
   "shares_owned_following", "txn_date", "trans_date", "filed_date"];
-const LAST = /^(accession_number|trans_seq|issuer_cik|owner_cik|cik|link|office|first_name|.*_guess_how|tkr_recovered|sub_id|generated_internal_id|filing_uuid)$/;
+const LAST = /^(accession_number|trans_seq|issuer_cik|owner_cik|cik|link|office|first_name|.*_guess_how|tkr_recovered|sub_id|generated_internal_id|filing_uuid|doc_id)$/;
 function orderColumns(cols) {
   const first = FIRST.filter(c => cols.includes(c));
   const last = cols.filter(c => LAST.test(c) && !first.includes(c));

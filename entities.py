@@ -74,6 +74,9 @@ _LEGAL_SUFFIX_RE = re.compile(
 
 def normalize_name(name):
     s = (name or "").upper()
+    # SEC titles carry the state of incorporation: "QUALCOMM INC/DE",
+    # "DANAHER CORP /DE/", "WELLS FARGO & COMPANY/MN" -- not part of the name.
+    s = re.sub(r"\s*/[A-Z]{2,3}/?", " ", s)
     s = re.sub(r"[.,&']", "", s)
     s = _LEGAL_SUFFIX_RE.sub("", s)
     return re.sub(r"\s+", " ", s).strip()
@@ -83,9 +86,30 @@ def load_sec_names(data):
     """{normalized company name: ticker} from a parsed company_tickers.json
     dict. Pure function of the data -- the network fetch is a separate,
     thin wrapper below so this half is testable offline."""
-    names = [(normalize_name(v["title"]), v["ticker"]) for v in data.values()]
-    counts = Counter(n for n, _ in names)
-    return {n: tk for n, tk in names if counts[n] == 1}
+    # One company often has several tickers under one title -- Wells Fargo is
+    # WFC plus WFC-PY, WFC-PL, ... (preferreds). That isn't the kind of
+    # ambiguity the rule is for (two DIFFERENT companies on one string), so a
+    # name resolves when it's one company (one CIK) with exactly one
+    # unhyphenated ticker and only hyphenated (preferred-style) others.
+    # Anything else stays dropped: GOOGL/GOOG and FOXA/FOX are separate common
+    # classes (13F holds them separately), and a note like METAM looks no
+    # different from a share class like GOOGL by symbol alone -- so AT&T
+    # (T, TBB) and Meta (META, METAM) stay unmatched rather than risk a wrong
+    # guess somewhere else.
+    tickers, ciks = {}, {}
+    for v in data.values():
+        n = normalize_name(v["title"])
+        tickers.setdefault(n, []).append(v["ticker"])
+        ciks.setdefault(n, set()).add(v.get("cik_str"))
+    out = {}
+    for n, tks in tickers.items():
+        if len(tks) == 1:
+            out[n] = tks[0]
+            continue
+        plain = [t for t in tks if "-" not in t]
+        if len(ciks[n]) == 1 and len(plain) == 1:
+            out[n] = plain[0]
+    return out
 
 
 def fetch_sec_data(session):
@@ -98,6 +122,65 @@ def make_sec_resolver(lookup):
     def resolver(name):
         tk = lookup.get(normalize_name(name))
         return None if not tk else (tk, "sec_name_exact")
+    return resolver
+
+
+# Trump's 278-Ts (Phase 17): the description is a company name plus share-
+# class words and OCR residue -- "COMCAST CORP CL A", "INSMED INC PAR $.01",
+# "BROADCOM INC Durehase" (a garbled "Purchase" fused on). Cleaned, then the
+# same exact SEC-name lookup as every other sec_name source -- cleaning only
+# removes words, it never makes a match looser. Rows that have no common-
+# stock ticker by nature return None: bonds/munis (coupon %, "DUE", REV, GO,
+# SER...) and preferreds/notes/warrants/units, whose tickers differ from the
+# issuer's common stock -- "KEYCORP DP SH PFD" must not become KEY.
+_TRUMP_NO_TICKER_RE = re.compile(
+    r"%|\bDUE\b|\bREV\b|\bGO\b|\bSER\b|\bBDS?\b|\bBONDS?\b|\bMUN\b|\bAUTH\b|"
+    r"\bPFD\b|\bPREF|\bNOTES?\b|\bDEP(OSITARY)?\b|\bWTS?\b|WARRANT|\bUNITS?\b|"
+    r"\bDEBS?\b|\bREGS\b|\bCTF\b|\bTREAS", re.I)
+_TRUMP_CLASS_RE = re.compile(
+    r"\s+(CL(ASS)?\s+[A-C]\b|COM(MON)?(\s+(STOCK|SHS|NEW))?\b|PAR\s+\$?[\d.]+|"
+    r"(SPONSORED\s+)?ADR\b|ORD(INARY)?(\s+SHS)?\b|SHS\b|NEW\b).*$")
+# a garbled transaction-type word fused onto the end ("Durehase", "sato")
+_TRUMP_TYPE_TAIL_RE = re.compile(r"\s+\S*(RCH|HAS[EO]|CHAS|SAL[EO]|SAT[EO])\S*$")
+
+
+def clean_trump_description(desc):
+    if not desc or _TRUMP_NO_TICKER_RE.search(desc):
+        return None
+    s = re.sub(r"[^A-Z0-9 &.,'-]", " ", desc.upper())
+    s = _TRUMP_TYPE_TAIL_RE.sub("", s)
+    s = _TRUMP_CLASS_RE.sub("", s)
+    s = re.sub(r"\s+", " ", s).strip(" -.,")
+    return s or None
+
+
+# Brokerage-statement abbreviations the 278-Ts use, against SEC's spelled-out
+# titles ("ABBOTT LABS" / "ABBOTT LABORATORIES").
+_TRUMP_ABBREV = [(r"\bLABS\b", "LABORATORIES"), (r"\bINTL\b", "INTERNATIONAL"),
+                 (r"\bCOS\b", "COMPANIES"), (r"\.COM\b", " COM")]
+
+
+def trump_name_variants(cleaned):
+    """Spellings to try in order, each as an EXACT lookup: as cleaned, with
+    abbreviations expanded, and with an OCR-fused legal suffix split off
+    ("WALMARTINC" -> "WALMART INC"). No variant loosens the match itself."""
+    out = [cleaned]
+    expanded = cleaned
+    for pat, rep in _TRUMP_ABBREV:
+        expanded = re.sub(pat, rep, expanded)
+    out.append(expanded)
+    out.append(re.sub(r"(?<=[A-Z]{4})(INC|CORP)$", r" \1", expanded))
+    return list(dict.fromkeys(out))
+
+
+def make_trump_resolver(lookup):
+    def resolver(desc):
+        cleaned = clean_trump_description(desc)
+        for name in (trump_name_variants(cleaned) if cleaned else []):
+            tk = lookup.get(normalize_name(name))
+            if tk:
+                return tk, "sec_name_cleaned"
+        return None
     return resolver
 
 
@@ -155,6 +238,11 @@ SOURCES = [
     dict(table="aircraft", name_col="owner_name", real_col=None,
          guess_col="owner_ticker_guess", how_col="owner_ticker_guess_how",
          extra_where=None, kind="sec_name"),
+    # Phase 17: 278-T descriptions have no ticker field -- see
+    # clean_trump_description for what's stripped and what's skipped.
+    dict(table="trump_trades", name_col="description", real_col=None,
+         guess_col="ticker_guess", how_col="ticker_guess_how",
+         extra_where=None, kind="sec_name_trump"),
 ]
 
 
@@ -215,8 +303,10 @@ def main(dry=False):
     ensure_schema(con)  # congress tables + trades view
 
     resolvers = {"extract": extract_congress}
-    if any(s["kind"] == "sec_name" for s in SOURCES):
-        resolvers["sec_name"] = make_sec_resolver(load_sec_names(fetch_sec_data(_session())))
+    if any(s["kind"].startswith("sec_name") for s in SOURCES):
+        lookup = load_sec_names(fetch_sec_data(_session()))
+        resolvers["sec_name"] = make_sec_resolver(lookup)
+        resolvers["sec_name_trump"] = make_trump_resolver(lookup)
 
     for src in SOURCES:
         for col in (src["guess_col"], src["how_col"]):
@@ -227,6 +317,49 @@ def main(dry=False):
 
 
 def selftest():
+    # Trump descriptions: share-class words and OCR'd type words come off,
+    # securities with no common-stock ticker are skipped outright
+    assert clean_trump_description("COMCAST CORP CL A") == "COMCAST CORP"
+    assert clean_trump_description("INSMED INC PAR $.01") == "INSMED INC"
+    assert clean_trump_description("BROADCOM INC Durehase") == "BROADCOM INC"
+    assert clean_trump_description("HOME DEPOT INC") == "HOME DEPOT INC"
+    assert clean_trump_description("KEYCORP DP SH PFD H -KEYpl") is None
+    assert clean_trump_description("TEXAS WTR DEV BRD ST REV 4.00 % Due Apr 1, 2036") is None
+    assert clean_trump_description("SIRIUS XM RADIO INC SENIOR NOTES REGS DUE 07/01/2030") is None
+    lookup = load_sec_names({"0": {"title": "Comcast Corp", "ticker": "CMCSA"},
+                             "1": {"title": "BROADCOM INC.", "ticker": "AVGO"}})
+    res = make_trump_resolver(lookup)
+    assert res("COMCAST CORP CL A") == ("CMCSA", "sec_name_cleaned")
+    assert res("BROADCOM INC Durehase") == ("AVGO", "sec_name_cleaned")
+    assert res("KEYCORP DP SH PFD H") is None
+    # incorporation tags, one company with several tickers, two companies on one name
+    multi = load_sec_names({
+        "0": {"title": "QUALCOMM INC/DE", "ticker": "QCOM", "cik_str": 1},
+        "1": {"title": "WELLS FARGO & COMPANY/MN", "ticker": "WFC", "cik_str": 2},
+        "2": {"title": "WELLS FARGO & COMPANY/MN", "ticker": "WFC-PY", "cik_str": 2},
+        "3": {"title": "ACME CORP", "ticker": "ACM1", "cik_str": 3},
+        "4": {"title": "Acme Corporation", "ticker": "ACM2", "cik_str": 4},
+        "5": {"title": "ABBOTT LABORATORIES", "ticker": "ABT", "cik_str": 5},
+        "6": {"title": "WALMART INC.", "ticker": "WMT", "cik_str": 6},
+        "7": {"title": "AMAZON COM INC", "ticker": "AMZN", "cik_str": 7},
+        "8": {"title": "Alphabet Inc.", "ticker": "GOOGL", "cik_str": 8},
+        "9": {"title": "Alphabet Inc.", "ticker": "GOOG", "cik_str": 8},
+        "10": {"title": "BERKSHIRE HATHAWAY INC", "ticker": "BRK-B", "cik_str": 9},
+        "11": {"title": "BERKSHIRE HATHAWAY INC", "ticker": "BRK-A", "cik_str": 9},
+        "12": {"title": "Meta Platforms, Inc.", "ticker": "META", "cik_str": 10},
+        "13": {"title": "Meta Platforms, Inc.", "ticker": "METAM", "cik_str": 10},
+    })
+    assert normalize_name("Meta Platforms Inc") not in multi  # META/METAM: can't tell -> dropped
+    assert normalize_name("Alphabet Inc") not in multi       # two common classes -> dropped
+    assert normalize_name("Berkshire Hathaway") not in multi  # A/B shares -> dropped
+    assert multi[normalize_name("Qualcomm Inc")] == "QCOM"
+    assert multi[normalize_name("Wells Fargo & Co")] == "WFC"  # common, not a preferred
+    assert normalize_name("Acme Corp") not in multi          # two companies -> dropped
+    r2 = make_trump_resolver(multi)
+    assert r2("ABBOTT LABS") == ("ABT", "sec_name_cleaned")
+    assert r2("WALMARTINC") == ("WMT", "sec_name_cleaned")
+    assert r2("AMAZON.COM INC") == ("AMZN", "sec_name_cleaned")
+
     # congress extraction -- unchanged from resolve_tickers.py
     assert extract_congress("Roper Technologies, Inc. - Common Stock (ROP)") == ("ROP", "paren")
     assert extract_congress("Loews Corporation (L)") == ("L", "paren")

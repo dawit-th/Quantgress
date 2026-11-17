@@ -321,6 +321,10 @@ def ensure_tables(con):
         tx_type VARCHAR, tx_date VARCHAR, notified_late BOOLEAN,
         amount_raw VARCHAR, amount_low BIGINT, amount_high BIGINT,
         filed VARCHAR, link VARCHAR)""")
+    # entities.py fills these (exact SEC-name match on a cleaned description);
+    # created here too so the view below never references a missing column.
+    for col in ("ticker_guess", "ticker_guess_how"):
+        con.execute(f"ALTER TABLE trump_trades ADD COLUMN IF NOT EXISTS {col} VARCHAR")
     # Two independent tells for "don't trust this row":
     #  1. A description with a stray '$' in it absorbed another failed row's
     #     leftover text (see parse_text) -- a clean single-transaction
@@ -351,6 +355,7 @@ def ensure_tables(con):
                tx_type, amount_low, amount_high, notified_late,
                CASE WHEN regexp_matches(description, '[0-9](\\.[0-9]+)?\\s*%')
                     THEN 'Bond/Note' ELSE 'Unclassified' END AS asset_class,
+               ticker_guess, ticker_guess_how,
                description, doc_id, qg_mdy(filed) AS filed_date, filed, link
         FROM trump_trades
         WHERE description NOT LIKE '%$%'
@@ -415,8 +420,11 @@ def main(limit=None, filer=PERSON, reparse=False):
 
             con.execute("DELETE FROM trump_trades WHERE doc_id = ?", [doc_id])
             if rows:
+                # named columns: entities.py adds ticker_guess/_how to this table
                 con.executemany(
-                    "INSERT INTO trump_trades VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO trump_trades (doc_id, row_num, description, tx_type, "
+                    "tx_date, notified_late, amount_raw, amount_low, amount_high, filed, link) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                     [(doc_id, r["row_num"], r["description"], r["tx_type"],
                       r["tx_date"], r["notified_late"], r["amount_raw"],
                       r["amount_low"], r["amount_high"], filed, link)
