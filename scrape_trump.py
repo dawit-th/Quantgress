@@ -23,6 +23,7 @@ Usage:
     py scrape_trump.py --limit 3    # bounded run, a few filings
     py scrape_trump.py              # every 278-T on file
     py scrape_trump.py --reparse    # re-fetch + re-parse all, even ones stored ok
+    py scrape_trump.py --pdf <OGE URL or local .pdf>   # one filing ProPublica lacks yet
 
 Re-running skips DocumentCloud doc_ids already in trump_filings.
 
@@ -44,6 +45,7 @@ Re-running skips DocumentCloud doc_ids already in trump_filings.
 """
 
 import io
+import os
 import re
 import sys
 import time
@@ -383,6 +385,48 @@ def done_doc_ids(con):
         "SELECT doc_id FROM trump_filings WHERE status = 'ok'").fetchall()}
 
 
+def file_key(file):
+    """Filing identity across sources: OGE names a file
+    "Donald-J-Trump.09.17.2026-278T", ProPublica's copy may differ only in
+    punctuation/spacing -- so compare lowercase letters and digits only."""
+    return re.sub(r"[^a-z0-9]", "", (file or "").lower())
+
+
+def store_filing(con, doc_id, file, link, pdf_bytes):
+    """Parse one 278-T PDF and (re)write it: its trades and its filing row.
+    Shared by the ProPublica crawl and --pdf imports. Returns (n_rows, status)."""
+    try:
+        with pdfplumber.open(io.BytesIO(pdf_bytes)) as p:
+            text = "\n".join(pg.extract_text() or "" for pg in p.pages)
+        rows, filed, expected = parse_text(text)
+        filed = filed or filed_from_name(file)
+        # under half the row markers recovered = mostly unreadable;
+        # 'partial' isn't 'ok', so it's retried (done_doc_ids)
+        status = ("ok" if len(rows) >= expected / 2 else "partial") if rows else "empty"
+    except Exception as e:
+        rows, filed, expected, status = [], None, 0, "error"
+        print(f"  {doc_id} {file}: {e}")
+
+    con.execute("DELETE FROM trump_trades WHERE doc_id = ?", [doc_id])
+    if rows:
+        # named columns: entities.py adds ticker_guess/_how to this table
+        con.executemany(
+            "INSERT INTO trump_trades (doc_id, row_num, description, tx_type, "
+            "tx_date, notified_late, amount_raw, amount_low, amount_high, filed, link) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            [(doc_id, r["row_num"], r["description"], r["tx_type"],
+              r["tx_date"], r["notified_late"], r["amount_raw"],
+              r["amount_low"], r["amount_high"], filed, link)
+             for r in rows])
+    # a retried filing replaces its previous attempt (doc_id is the key)
+    con.execute("DELETE FROM trump_filings WHERE doc_id = ?", [doc_id])
+    con.execute("INSERT INTO trump_filings VALUES (?,?,?,?,?,?,?)",
+                [doc_id, file, filed, link, status, len(rows), expected])
+    note = f" (expected ~{expected})" if expected > len(rows) else ""
+    print(f"  {file}: {len(rows)} txns [{status}]{note}")
+    return len(rows), status
+
+
 def main(limit=None, filer=PERSON, reparse=False):
     con = duckdb.connect(DB_PATH)
     try:
@@ -391,6 +435,10 @@ def main(limit=None, filer=PERSON, reparse=False):
         # for after a parser fix (the 08.12.2025 filing was stored with 3 of
         # its ~500 rows before the two-line layout was handled).
         done = set() if reparse else done_doc_ids(con)
+        # a filing already imported straight from OGE (--pdf) isn't stored a
+        # second time when ProPublica's mirror catches up with it
+        imported = {file_key(f) for (f,) in con.execute(
+            "SELECT file FROM trump_filings WHERE doc_id LIKE 'oge:%' AND status = 'ok'").fetchall()}
 
         s = _session()
         docs = list(list_documents(s, filer))
@@ -400,45 +448,56 @@ def main(limit=None, filer=PERSON, reparse=False):
         for doc_id, slug, file in docs:
             if limit is not None and n >= limit:
                 break
-            if doc_id in done:
+            if doc_id in done or file_key(file) in imported:
                 continue
             time.sleep(RATE_LIMIT_SECS)
             link = f"https://www.documentcloud.org/documents/{doc_id}-{slug}/"
             try:
                 pdf = s.get(PDF_URL.format(doc_id=doc_id, slug=slug), timeout=60)
                 pdf.raise_for_status()
-                with pdfplumber.open(io.BytesIO(pdf.content)) as p:
-                    text = "\n".join(pg.extract_text() or "" for pg in p.pages)
-                rows, filed, expected = parse_text(text)
-                filed = filed or filed_from_name(file)
-                # under half the row markers recovered = mostly unreadable;
-                # 'partial' isn't 'ok', so it's retried (done_doc_ids)
-                status = ("ok" if len(rows) >= expected / 2 else "partial") if rows else "empty"
+                content = pdf.content
             except Exception as e:
-                rows, filed, expected, status = [], None, 0, "error"
                 print(f"  {doc_id} {file}: {e}")
-
-            con.execute("DELETE FROM trump_trades WHERE doc_id = ?", [doc_id])
-            if rows:
-                # named columns: entities.py adds ticker_guess/_how to this table
-                con.executemany(
-                    "INSERT INTO trump_trades (doc_id, row_num, description, tx_type, "
-                    "tx_date, notified_late, amount_raw, amount_low, amount_high, filed, link) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                    [(doc_id, r["row_num"], r["description"], r["tx_type"],
-                      r["tx_date"], r["notified_late"], r["amount_raw"],
-                      r["amount_low"], r["amount_high"], filed, link)
-                     for r in rows])
-            # a retried filing replaces its previous attempt (doc_id is the key)
-            con.execute("DELETE FROM trump_filings WHERE doc_id = ?", [doc_id])
-            con.execute("INSERT INTO trump_filings VALUES (?,?,?,?,?,?,?)",
-                        [doc_id, file, filed, link, status, len(rows), expected])
-            note = f" (expected ~{expected})" if expected > len(rows) else ""
-            print(f"  {file}: {len(rows)} txns [{status}]{note}")
+                content = b""
+            store_filing(con, doc_id, file, link, content)
             n += 1
 
         total = con.execute("SELECT count(*) FROM trump_trades").fetchone()[0]
         print(f"\n{total} Trump transactions in {DB_PATH}")
+    finally:
+        con.close()
+
+
+def import_pdf(src):
+    """--pdf: one filing ProPublica's mirror doesn't have yet, from an OGE URL
+    or a local file. The user's call to fetch it (see the module notes on
+    OGE's Form 201 system); this only parses and stores what it's given.
+    doc_id is "oge:<OGE document id>" for an OGE URL, else "file:<name>"."""
+    if re.match(r"https?://", src):
+        r = _session().get(src, timeout=120)
+        r.raise_for_status()
+        content, link = r.content, src
+        m = re.search(r"/([0-9A-F]{32})/\$FILE/", src, re.I)
+        file = requests.utils.unquote(src.rsplit("/", 1)[-1]).removesuffix(".pdf")
+        doc_id = f"oge:{m.group(1).upper()}" if m else f"url:{file_key(file)}"
+    else:
+        with open(src, "rb") as f:
+            content = f.read()
+        file = os.path.basename(src).removesuffix(".pdf")
+        link, doc_id = None, f"file:{file_key(file)}"
+    con = duckdb.connect(DB_PATH)
+    try:
+        ensure_tables(con)
+        # the same filing already on file under ProPublica's id: replace it
+        # rather than storing it twice
+        dupes = [d for (d, f) in con.execute("SELECT doc_id, file FROM trump_filings").fetchall()
+                 if file_key(f) == file_key(file) and d != doc_id]
+        for d in dupes:
+            con.execute("DELETE FROM trump_trades WHERE doc_id = ?", [d])
+            con.execute("DELETE FROM trump_filings WHERE doc_id = ?", [d])
+        store_filing(con, doc_id, file, link, content)
+        if dupes:
+            print(f"  replaced the earlier copy: {', '.join(dupes)}")
     finally:
         con.close()
 
@@ -468,6 +527,9 @@ def selftest():
     assert filed_from_name("Trump, Donald J.-05.08.2026-278T(2)") == "5/8/2026"
     assert filed_from_name("Donald J. Trump 2.26.2026 278-T (1)") == "2/26/2026"
     assert filed_from_name("no date here") is None
+    # the same filing under OGE's and ProPublica's naming is one filing
+    assert file_key("Donald-J-Trump.09.17.2026-278T") == file_key("Donald-J-Trump-09.17.2026-278T")
+    assert file_key("Donald-J-Trump.09.17.2026-278T") != file_key("Donald-J-Trump-09.8.2026-278T")
 
     assert parse_amount_ocr("$250,001 - $500,000") == (250001, 500000)
     # OCR turns '$' into 's' and '0' into 'o'/'O' -- verbatim from a real
@@ -532,6 +594,8 @@ def arg(flag, default=None):
 if __name__ == "__main__":
     if "--selftest" in sys.argv:
         selftest()
+    elif "--pdf" in sys.argv:
+        import_pdf(arg("--pdf"))
     else:
         n = arg("--limit")
         main(int(n) if n else None, arg("--filer", PERSON), reparse="--reparse" in sys.argv)
