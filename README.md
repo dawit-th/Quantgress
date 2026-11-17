@@ -11,7 +11,7 @@
 Every dataset here is public U.S. government or public-domain disclosure data: SEC, Senate/House ethics offices, FEC, FINRA, USAspending, USPTO, Wikimedia, FAA. Nothing is scraped from a paid source. Two feeds are free but account-gated — OpenSky flight history (Phase 20) and Reddit (Phase 21) — and they are the only non-government dependencies in the project, and the only ones that will not run anonymously.
 
 ```
-py q.py "SELECT tkr, count(*) AS n, sum(amount_low) AS min_dollars
+python q.py "SELECT tkr, count(*) AS n, sum(amount_low) AS min_dollars
          FROM trades WHERE tkr IS NOT NULL
          GROUP BY tkr ORDER BY n DESC LIMIT 5"
 ```
@@ -64,7 +64,7 @@ The project was scoped originally against congressional trades (Senate + House P
 | 14 | Wikipedia pageviews | [Wikimedia REST API](https://doc.wikimedia.org/generated-data-platform/aqs/analytics-api/reference/page-views.html) | none | as needed | `scrape_pageviews.py` |
 | 15 | Politician net worth (floor estimate) | derived — `trades` × live prices | none | on demand | `networth.py` |
 | 16 | Executive compensation (Pay vs. Performance) | [SEC XBRL Frames API](https://www.sec.gov/edgar/sec-api-documentation) | none (UA header) | as needed | `scrape_execcomp.py` |
-| 17 | Donald Trump 278-T trades | [ProPublica DocumentCloud mirror](https://projects.propublica.org/trump-team-financial-disclosures/) | none | manual | `scrape_trump.py` |
+| 17 | Donald Trump 278-T trades | [ProPublica DocumentCloud mirror](https://projects.propublica.org/trump-team-financial-disclosures/) | none | weekly | `scrape_trump.py` |
 | 18 | Senate Annual Financial Disclosure (accurate net worth) | efdsearch.senate.gov | session only | annual | `scrape_senate_annual.py` |
 | 19 | House Annual Financial Disclosure (accurate net worth) | disclosures-clerk.house.gov | none (UA header) | annual | `scrape_house_annual.py` |
 | 20 | Corporate jet registry + flight history | [FAA Releasable Aircraft DB](https://www.faa.gov/licenses_certificates/aircraft_certification/aircraft_registry/releasable_aircraft_download) + [OpenSky](https://opensky-network.org/) | none / OAuth2 client | monthly / daily | `scrape_flights.py` |
@@ -110,7 +110,13 @@ Quantgress/
 ├── scrape_house.py           # Phase 2 — House PTR scraper (PDF parsing)
 ├── entities.py                # Phase 3/8 — cross-dataset ticker/company resolution
 ├── daily.py                   # Phase 4 — scheduled incremental driver
-├── api.py                     # Phase 5 — read-only FastAPI layer
+├── api.py                     # Phase 5 — read-only FastAPI layer (+ /health, /ui)
+├── auth.py                    # API keys, stored hashed in auth.duckdb
+├── static/ui.html             # the browser UI, served at /ui
+├── run_job.py                 # what each schedule group runs; called by launchd/cron
+├── snapshot.py                # refreshes the read-only copy the API serves
+├── health.py                  # per-dataset freshness (CLI, /health, job summary)
+├── envfile.py                 # shared .env loader
 ├── scrape_lobbying.py         # Phase 6 — LDA.gov lobbying filings
 ├── scrape_contracts.py        # Phase 7 — USAspending contract awards
 ├── scrape_insiders.py         # Phase 9 — SEC Form 4 insider transactions
@@ -127,8 +133,12 @@ Quantgress/
 ├── scrape_flights.py          # Phase 20 — FAA aircraft registry + OpenSky flights
 ├── scrape_wsb.py              # Phase 21 — r/wallstreetbets mentions + FinBERT sentiment
 ├── q.py                       # query helper (sidesteps PowerShell quoting issues)
-├── congress_trades.duckdb     # the database (gitignored in a production checkout)
-├── requirements.txt
+├── congress_trades.duckdb     # the database (gitignored)
+├── congress_trades.read.duckdb  # snapshot the API reads (gitignored)
+├── auth.duckdb                # API keys (gitignored)
+├── requirements.txt           # pinned; requirements-wsb.txt adds torch/transformers
+├── deploy/                    # launchd (macOS) + cron.d (Linux) schedules
+├── .github/workflows/         # CI: every module's --selftest on push
 └── .env                       # USPTO / FEC / OpenSky credentials (gitignored)
 ```
 
@@ -136,7 +146,7 @@ Quantgress/
 
 ### Prerequisites
 
-- Python 3.10+ (Windows: use `py`, not `python`; `python` resolves to the Microsoft Store stub)
+- Python 3.11 (the version CI tests). Commands below use `python` — on Windows use the `py` launcher instead, since `python` resolves to the Microsoft Store stub
 - No database server — DuckDB ships as a library dependency
 
 ### Installation
@@ -144,7 +154,8 @@ Quantgress/
 ```bash
 git clone <this-repo>
 cd Quantgress
-py -m pip install -r requirements.txt
+python -m venv .venv && .venv/bin/python -m pip install -r requirements.txt
+# only if you'll run WSB sentiment (~2GB): .venv/bin/python -m pip install -r requirements-wsb.txt
 ```
 
 ### API keys (optional, only needed for Phases 12, 13, 20 & 21)
@@ -164,31 +175,31 @@ REDDIT_CLIENT_SECRET=<same page>
 
 All four scrapers still run `--selftest` with no key, no network, and (for Phase 21) no model download at all. Phase 20's registry half (`--registry`) needs no credentials either — only `--flights` does, and OpenSky rejects anonymous requests to it outright with a 403. Reddit is the same story: unauthenticated automated reads of `reddit.com/*.json` are blocked, so Phase 21 has no anonymous fallback.
 
-Phase 21's sentiment half also needs `transformers` + `torch` (~2GB installed) for FinBERT, which downloads ~440MB of weights on first run. Both are imported lazily — `py scrape_wsb.py --no-sentiment` collects mention counts without either installed.
+Phase 21's sentiment half also needs `transformers` + `torch` (~2GB installed, `requirements-wsb.txt`) for FinBERT, which downloads ~440MB of weights on first run. Both are imported lazily — `python scrape_wsb.py --no-sentiment` collects mention counts without either installed.
 
 ## Quick Start
 
 ```bash
 # 1. Validate every parser offline (instant, no network)
-py scrape_senate.py --selftest
-py scrape_house.py --selftest
+python scrape_senate.py --selftest
+python scrape_house.py --selftest
 
 # 2. Bounded live runs to confirm access before a full backfill
-py scrape_senate.py --limit 20
-py scrape_house.py --year 2026 --limit 25
+python scrape_senate.py --limit 20
+python scrape_house.py --year 2026 --limit 25
 
 # 3. Resolve tickers embedded in the free-text asset names
-py entities.py --dry     # preview, writes nothing
-py entities.py           # write recovered tickers
+python entities.py --dry     # preview, writes nothing
+python entities.py           # write recovered tickers
 
 # 4. Query
-py q.py                                  # per-senator summary
-py q.py --types                          # asset-type breakdown
-py q.py "SELECT * FROM trades LIMIT 10"  # arbitrary SQL
+python q.py                                  # per-senator summary
+python q.py --types                          # asset-type breakdown
+python q.py "SELECT * FROM trades LIMIT 10"  # arbitrary SQL
 
 # 5. Serve it (every data route needs a key -- see "Using the API" below)
-py -m uvicorn api:app --reload
-QG_KEY=$(py auth.py issue you@example.com)
+python -m uvicorn api:app --reload
+QG_KEY=$(python auth.py issue you@example.com)
 curl -H "X-API-Key: $QG_KEY" "http://127.0.0.1:8000/trades?tkr=NVDA&limit=5"
 ```
 
@@ -201,15 +212,21 @@ The full command reference (every flag, every gotcha, every verified query) live
 `api.py` is a read-only FastAPI layer over the database: one generic route per dataset, driven by a declarative `RELATIONS` table, plus three hand-built routes for the original congressional-trades scope.
 
 ```bash
-py api.py --selftest                             # offline route checks, no server
-py -m uvicorn api:app --reload                    # dev server, http://127.0.0.1:8000
-py -m uvicorn api:app --host 0.0.0.0 --port 8000   # LAN-visible, trusted networks only
+python api.py --selftest                             # offline route checks, no server
+python -m uvicorn api:app --reload                    # dev server, http://127.0.0.1:8000
+python -m uvicorn api:app --host 0.0.0.0 --port 8000   # LAN-visible, trusted networks only
 ```
+
+**Browser UI:** with the server running, open **http://127.0.0.1:8000/ui** — a single static page (`static/ui.html`, no build step) over this same API. Paste a key once (it stays in that browser), then browse Senate/House trades, insider buys and sales, any dataset's filters, or look up a politician or ticker. Click a row for every field plus plain-English meanings of codes like `trans_code` and `acquired_disposed`; every query shows its equivalent `curl` command.
+
+**It stays up while scrapers run.** DuckDB lets no other process open a file while a writer holds it, so the API reads `congress_trades.read.duckdb` — a copy `run_job.py` refreshes after each scheduled job (or `python snapshot.py` by hand) — instead of the live file. Data is at most one job old. Before the first snapshot exists it falls back to the live file; set `QG_API_DB` to point it anywhere else.
 
 | Endpoint | Description |
 |---|---|
-| `GET /` | Dataset names and row counts |
-| `GET /trades` | The unified congress-trades view. Filters: `tkr`, `last_name`, `chamber` |
+| `GET /` | Dataset names, row counts, and each dataset's filter columns |
+| `GET /health` | Public, no key: newest date, age and `ok`/`stale` status of every dataset (see `health.py`), plus when the snapshot was taken |
+| `GET /ui` | The browser UI |
+| `GET /trades` | The unified congress-trades view. Filters: `tkr`, `last_name`, `chamber`, `tx_type`, `asset_type`, `date_suspect` (`true` = trade dated after its own filing — a typo in the source, kept as filed) |
 | `GET /politician/{name}` | Per-politician summary + trade listing (substring match on last name) |
 | `GET /ticker/{symbol}` | All activity for one ticker (exact, case-insensitive) |
 | `POST /signup` | Public, no key needed: `{"email": ...}` in, an API key out (5/day per IP, one active key per email) |
@@ -219,16 +236,16 @@ Every listing route accepts `?limit=` (default 100, max 1000) and `?offset=`. Fi
 
 `short_volume` is deliberately **not** served over HTTP (FINRA's terms bar redistributing it) — query it locally with `q.py` instead.
 
-**Auth and limits:** every route except `POST /signup` requires an `X-API-Key` header (missing or revoked key → `401`). Keys are stored only as SHA-256 hashes in the `api_keys` table. Requests are rate-limited to 500/day per key (`429` past that), and CORS only allows the marketing site to call `/signup` from a browser. See [Legal & Compliance](#legal--compliance) before considering a public deployment.
+**Auth and limits:** every route except `POST /signup`, `GET /health` and `GET /ui` requires an `X-API-Key` header (missing or revoked key → `401`). Keys are stored only as SHA-256 hashes, in their own `auth.duckdb` — separate from the data so a running scraper never blocks a key check or a signup. Requests are rate-limited to 500/day per key (`429` past that), and CORS only allows the marketing site to call `/signup` from a browser. See [Legal & Compliance](#legal--compliance) before considering a public deployment.
 
 ### Using the API
 
 **1. Get a key.** Either mint one locally (prints the key once — save it):
 
 ```bash
-py auth.py issue you@example.com      # create + print a key
-py auth.py list                       # every issued key + status
-py auth.py revoke <key>               # disable a key
+python auth.py issue you@example.com      # create + print a key
+python auth.py list                       # every issued key + status
+python auth.py revoke <key>               # disable a key
 ```
 
 or use the public signup route:
@@ -325,41 +342,59 @@ Every non-congress dataset (lobbying, contracts, insider trades, 13F, short volu
 `daily.py` is the incremental driver: Senate (full history, but only new filings actually write), House (current + prior calendar year, to catch year-boundary filings), then `entities.py` to resolve tickers on whatever was just added. Every underlying scraper already resumes from what's stored, so a normal day only touches new filings. `daily.py` adds no new scraping logic of its own, only call order.
 
 ```bash
-py daily.py --selftest    # offline check, instant
-py daily.py                # run it once
+python daily.py --selftest    # offline check, instant
+python daily.py                # run it once
 ```
 
-Scheduled with the OS's native scheduler, not a long-running Python process.
+Scheduled with the OS's native scheduler, not a long-running Python process. Both macOS and Linux call one entry point, `run_job.py <group>`, so the job list lives in one place:
 
-**macOS (launchd)** — same jobs and times as `deploy/cron.d/`, installed as per-user LaunchAgents:
+```bash
+python run_job.py --list       # every group and its scripts
+python run_job.py daily        # run a group now, exactly as the scheduler does
+python health.py               # newest date + age of every dataset, flags stale ones
+```
+
+| Group | When (local time) | Runs, in order |
+|---|---|---|
+| `daily` | every day 06:00 | `daily.py` (Senate, House, tickers, short volume), `scrape_insiders.py --live` |
+| `weekly` | Sunday 07:00 | `scrape_contracts.py`, `scrape_patents.py`, `scrape_trump.py` |
+| `quarterly` | Jan/Apr/Jul/Oct 1st 08:00 | `scrape_13f.py`, `scrape_lobbying.py` |
+| `annual-jan` | Jan 2nd 09:00 | `scrape_donors.py`, `scrape_execcomp.py`, `scrape_senate_annual.py` |
+| `annual-sep` | Sep 2nd 09:00 | `scrape_house_annual.py` |
+
+What `run_job.py` does around the scripts:
+
+- **One at a time.** A group runs its scripts back to back, and a group that starts while another is running waits for it. DuckDB allows one writer, so the old layout (jobs staggered 15 minutes apart) crashed any job that started while a slow one still held the lock — Sunday's weekly job did exactly that behind a long daily run.
+- **Timeouts.** A script still running after 1 hour sends a warning; after 4 hours it's stopped (every scraper resumes where it left off).
+- **Failures are loud.** Any non-zero exit fails the group and, on macOS, posts a notification. Each script logs to `logs/<name>.log`.
+- **Missing keys are skipped, not failed.** `scrape_patents.py` (`USPTO_API_KEY`) and `scrape_donors.py` (`FEC_API_KEY`) are skipped with a note when their key isn't in `.env`, so a missing key doesn't mask a real failure; `health.py` still reports those datasets stale.
+- **Snapshot refresh.** At the end it refreshes `congress_trades.read.duckdb`, the copy the API serves (see [The API](#the-api)).
+
+WSB (`scrape_wsb.py`) isn't scheduled: it needs `requirements-wsb.txt` and approved Reddit API credentials, and failing every run made the daily job's status meaningless. Add it to `GROUPS` in `run_job.py` once it can run.
+
+**macOS (launchd)** — installed as per-user LaunchAgents:
 
 ```bash
 sh deploy/launchd/install.sh              # write + load the 5 jobs into ~/Library/LaunchAgents
-sh deploy/launchd/install.sh --status     # loaded jobs + last exit code
+sh deploy/launchd/install.sh --status     # loaded jobs + last exit code (0 = ok)
 launchctl kickstart gui/$(id -u)/com.quantgress.daily   # run one now
 sh deploy/launchd/install.sh --uninstall  # remove them
 ```
 
-| Job | When (local time) | Runs, in order |
-|---|---|---|
-| `com.quantgress.daily` | every day 06:00 | `daily.py`, `scrape_short_volume.py`, `scrape_insiders.py --live`, `scrape_wsb.py` |
-| `com.quantgress.weekly` | Sunday 07:00 | `scrape_contracts.py`, `scrape_patents.py` |
-| `com.quantgress.quarterly` | Jan/Apr/Jul/Oct 1st 08:00 | `scrape_13f.py`, `scrape_lobbying.py` |
-| `com.quantgress.annual-jan` | Jan 2nd 09:00 | `scrape_donors.py`, `scrape_execcomp.py`, `scrape_senate_annual.py` |
-| `com.quantgress.annual-sep` | Sep 2nd 09:00 | `scrape_house_annual.py` |
+A run time that passes while the Mac is asleep fires once on wake; a powered-off Mac skips it. Paths are taken from wherever the repo lives, so the plists aren't committed — the script generates them. Re-run `install.sh` after pulling changes to it.
 
-Each script logs to `logs/<name>.log` (same names as cron). Unlike the cron files, a cadence group runs its scripts **back to back in one job** rather than staggered 15 minutes apart: DuckDB allows one writer at a time, so a staggered job that starts while a long `daily.py` is still running dies on the file lock. A run time that passes while the Mac is asleep fires once on wake; a powered-off Mac skips it. Paths are taken from wherever the repo lives, so the plists aren't committed — the script generates them.
+**Linux (cron)** — `deploy/cron.d/` has one `/etc/cron.d` file per group, each a single `run_job.py` line; see [`deploy/cron.d/README.md`](deploy/cron.d/README.md).
 
 **Windows (Task Scheduler):**
 
 ```
 schtasks /create /tn "Quantgress Daily" /sc daily /st 09:00 ^
-  /tr "cmd /c cd /d C:\path\to\Quantgress && py daily.py >> daily.log 2>&1" /f
+  /tr "cmd /c cd /d C:\path\to\Quantgress && python daily.py >> daily.log 2>&1" /f
 ```
 
 STOCK Act disclosures have a 30–45 day filing window, so a daily cadence is comfortably fast enough; a missed day is invisible and self-heals on the next run.
 
-**Beyond `daily.py`:** only Phases 1-3 run on the schedule above. The other 13 phases (lobbying, contracts, insider trades, 13F, short volume, patents, donors, pageviews, exec comp, Trump trades, annual disclosures, aircraft/flights, WSB mentions) are manual-only today (`py scrape_*.py`) — a real gap once any of that data is served publicly, since a paid tier can't silently go stale. `deploy/cron.d/` has the Linux deployment schedule for the Oracle Cloud box (and `deploy/launchd/` the same schedule for a Mac, above): one `/etc/cron.d` file per cadence group (daily/weekly/quarterly/annual, grouped by each source's actual upstream update frequency, not run nightly regardless) — see [`deploy/cron.d/README.md`](deploy/cron.d/README.md) for the install steps and the full phase-to-cadence mapping. Trump trades (Phase 17) is the one deliberate exception, left manual since ProPublica's mirror has no fixed publication schedule to key a cron line off of.
+Phases with no schedule, run by hand: pageviews (needs an explicit `--article` watchlist), flights, and WSB (above). Trump trades used to be manual because ProPublica's mirror has no fixed publishing cadence — but that left 7 filings (Apr–Sep 2026) unscraped for months, so it's now polled weekly.
 
 ## Legal & Compliance
 
@@ -375,7 +410,7 @@ None of the above blocks personal use, local research, or the API as shipped (un
 
 ## Known Limitations
 
-- **House OCR is not built.** Scanned (image-only) PTR filings are queued (`house_filings.status = 'scanned'`) rather than parsed — roughly an eighth of recent filings, more in older years. `py scrape_house.py --ocr-queue` lists what's waiting.
+- **House OCR is not built.** Scanned (image-only) PTR filings are queued (`house_filings.status = 'scanned'`) rather than parsed — roughly an eighth of recent filings, more in older years. `python scrape_house.py --ocr-queue` lists what's waiting.
 - **Net worth figures are floor estimates, not real holdings.** Disclosures only ever give a dollar bracket, never a share count — `networth.py`'s default mode sums bracket floors, marked to live prices. `networth.py --annual` (Phase 18, Senate only) is materially more accurate: real Dec-31 asset/liability snapshots from Annual Financial Disclosure Reports, not inferred from trade brackets.
 - **Entity resolution coverage is genuinely low for four datasets** (lobbying, contracts, patents, donors) — 2–7% of distinct names match a public ticker on the first pass, by design: most lobbying clients, contract recipients, patent assignees, and donors are private companies, government bodies, or associations with no ticker to have.
 - **No `con.close()` in every scraper** (in progress). A completed run's data can sit WAL-only until the connection is cleanly closed. Don't delete a `.duckdb.wal` file without checking whether it holds unflushed data first.

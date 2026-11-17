@@ -86,13 +86,20 @@ Each step already does its own incremental work (senate skips links already in `
 **Gotchas:**
 - House only needs current + previous year: the annual ZIP is keyed by filing year, and a late-Dec filing can land in next year's index in January, so the prior year stays live a few weeks past New Year's. Older years never gain filings after publication.
 - STOCK Act gives filers 30–45 days to disclose, so **once-a-day is plenty**.
-- Runs under Windows Task Scheduler; stdout/stderr redirect to `daily.log` at the scheduler level (`cmd /c ... >> daily.log 2>&1`).
+- Scheduled through `run_job.py <group>` (daily/weekly/quarterly/annual-jan/annual-sep), called by `deploy/launchd/install.sh` on macOS or `deploy/cron.d/` on Linux. It runs a group's scripts **in sequence** (DuckDB allows one writer — the old 15-min cron stagger crashed jobs that overlapped), waits if another group is running, warns at 1h / stops at 4h, skips scripts whose API key is missing, notifies on failure, then refreshes the API snapshot. Per-script logs in `logs/<name>.log`.
+- `python health.py` (and public `GET /health`) shows each dataset's newest date and flags it stale against its source's cadence — the check that would have caught the short-volume and insiders silent failures.
+- WSB is deliberately off the daily group until it has `requirements-wsb.txt` + approved Reddit credentials.
 
 ## Phase 5 — FastAPI layer — ✅ DONE
 
 Endpoints: `/trades`, `/politician/{name}`, `/ticker/{symbol}`, all over a **read-only DuckDB connection**.
 
-Note: no FastAPI module exists in the repo yet (no `app.py`/`main.py`, no `fastapi`/`uvicorn` in `requirements.txt`). The API surface is specified here; the implementation file is still to be committed. `q.py` is the current query surface — it queries the `trades` view, not the raw `senate_trades`/`house_trades` tables (the view has recovered tickers coalesced in, real DATE columns, and both chambers).
+**Module:** `api.py` (+ `auth.py`, `static/ui.html`). Beyond the three routes above: a generic `/{dataset}` route driven by `RELATIONS`, `POST /signup`, public `GET /health`, and the browser UI at `GET /ui`. Every data route needs an `X-API-Key`.
+
+- **Reads a snapshot, not the live DB.** `snapshot.py` copies `congress_trades.duckdb` → `congress_trades.read.duckdb` (CHECKPOINT, copy, atomic `os.replace`); `run_job.py` refreshes it after every job. Before this, every scraper's write lock made every API request 500 for the length of the job. `QG_API_DB` overrides the path.
+- **Keys live in `auth.duckdb`**, separate from the data, always opened read-write (DuckDB refuses mixed read-only/read-write connections to one file in one process). Pre-split keys are migrated on first start. Selftests use temp files — the old auth selftest minted a real key into the live DB every run.
+- `api.py --selftest` runs against the real data, so CI skips it; run it locally.
+- `q.py` still queries the live DB directly — the `trades` view, not the raw `senate_trades`/`house_trades` tables (the view has recovered tickers coalesced in, real DATE columns, both chambers, and a `date_suspect` flag for trades dated after their own filing).
 
 ## Phase 6 — corporate lobbying — ✅ DONE
 
