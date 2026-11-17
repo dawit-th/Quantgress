@@ -49,7 +49,8 @@ CHECKS = [
     ("wsb_mentions", "wsb_mentions", "max(" + _ISO.format("date") + ")", None),
     ("flights", "flight_scans", "max(" + _ISO.format("day") + ")", None),
     ("pageviews", "pageviews", "max(" + _ISO.format("date") + ")", None),
-    ("trump_trades", "trump_trades_clean", "max(txn_date)", 90),
+    # filing date, not trade date: 278-Ts report trades weeks after the fact
+    ("trump_trades", "trump_trades_clean", "max(filed_date)", 90),
 ]
 
 

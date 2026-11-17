@@ -22,6 +22,7 @@ Usage:
     py scrape_trump.py --selftest   # offline parser checks
     py scrape_trump.py --limit 3    # bounded run, a few filings
     py scrape_trump.py              # every 278-T on file
+    py scrape_trump.py --reparse    # re-fetch + re-parse all, even ones stored ok
 
 Re-running skips DocumentCloud doc_ids already in trump_filings.
 
@@ -81,18 +82,30 @@ BRACKETS = {
 # many lines it wrapped across. Type words are badly OCR'd ("lourchoso",
 # "PUrchoso", "salo"), so matched by substring rather than an exact set.
 TYPE_RE = r"\S*(?:[uo]rch\S*|sal[eo]\S*|xch[ae]ng\S*)"
+# The late flag is optional here: some filings (08.12.2025) lay a row out
+# as "54 YES" on one line and "<description> Purchase 2/5/2025 $50,001 -
+# $100,000" on the next, with no flag between date and amount. A flag token
+# never contains '$', which is what lets the regex tell it from the amount.
 TAIL_RE = re.compile(
     rf"(?P<type>{TYPE_RE})\s+(?P<date>\d{{1,2}}/\d{{1,2}}/\d{{2,4}})\s+"
-    r"(?P<flag>\S+)\s+(?P<amt>[\$sS].*\d.*)$", re.I)
-NUM_RE = re.compile(r"^\s*(\d{1,3})\s+")
-NUM_ONLY_RE = re.compile(r"^\s*(\d{1,3})\s*$")
-RECEIVED_RE = re.compile(r"OGE RECEIVED:?\s*(\d{1,2}/\d{1,2}/\d{2,4})")
+    r"(?:(?P<flag>[^\s$]+)\s+)?(?P<amt>[\$sS].*\d.*)$", re.I)
+# Row numbers run past 999 -- the 05.08.2026 filing has 1,400+ transactions.
+NUM_RE = re.compile(r"^\s*(\d{1,4})\s+")
+NUM_ONLY_RE = re.compile(r"^\s*(\d{1,4})\s*$")
+# "54 YES" / "10 . . .. YES '": a row number with only the late flag after it.
+NUM_FLAG_RE = re.compile(r"^\s*(\d{1,4})\s+(?:[\W_]+\s*)*([vy][eo0]s|n[o0])\W*$", re.I)
+# Case-insensitive: 2026 forms print "OGE Received: 6/29/2026".
+RECEIVED_RE = re.compile(r"OGE RECEIVED:?\s*(\d{1,2}/\d{1,2}/\d{2,4})", re.I)
+# Fallback entry into the table when the received stamp is missing or
+# unreadable (05.08.2026 (2) has none): the column header row repeated at
+# the top of every transactions page.
+TABLE_HEADER_RE = re.compile(r"^#?\s*D\S*cr\S*\s.*Amount\s*$", re.I)
 # Row-start marker only (leading number), independent of whether the rest of
 # that row goes on to parse cleanly -- some real rows never match TAIL_RE at
 # all (a slash dropped from the date, "12/10/2025" OCR'd as "12110/2025",
 # turns three groups into two and the date pattern simply can't match). This
 # gives an honest denominator for coverage instead of a silent undercount.
-ROW_START_RE = re.compile(r"^(\d{1,3})\s+\S")
+ROW_START_RE = re.compile(r"^(\d{1,4})\s+\S")
 # Page furniture and form boilerplate -- never part of a description, mangled
 # every which way by OCR, so matched on a stable leading fragment per line
 # rather than the whole (unrecoverable) line.
@@ -102,6 +115,67 @@ SKIP_RE = re.compile(
     r"[DO]onald J|[DO]on[ae]ld|Summary of Contents|Privacy Act|U\.S\. [O0]|"
     r"C.OVERNM|Exocutivo Branch|Periodic Transaction|OGE RECEIVED|"
     r"[-_=•]+$)", re.I)
+
+
+# ── fallback for rows TAIL_RE can't read ──────────────────────────────
+# Coverage was 50-90% per filing because TAIL_RE needs a legible type word
+# AND date ("l!Ud>ase 3112/2026" is "purchase 3/12/2026"). Nearly every such
+# row still starts with its row number and ends in a readable dollar bracket,
+# so those two anchors take the row; type/date are filled when legible and
+# left NULL when not -- a NULL is honest, a dropped row is a silent undercount.
+# Guards against non-rows: the amount must resolve to a real Schedule B
+# bracket floor, and there must be a second transaction signal (late flag
+# before the amount, a type word, or a date).
+AMT_END_RE = re.compile(
+    r"(?P<amt>[\$sS§][\s\dOo]?[\dOoIl(][\dOoIl,.\s()]*?\s*[-•·~—]+\s*"
+    r"[\$sS§]?\s?[\dOoIl(][\dOoIl,.\s()]*)\s*\W?$")
+FLAG_END_RE = re.compile(r"(?:^|\s)([vy][eo0]s|n[o0])\W{0,3}\s*$", re.I)
+STRICT_DATE_RE = re.compile(r"(?<![\w/])(\d{1,2})/(\d{1,2})/(\d{4}|\d{2})(?![\w/])")
+MATURITY_RE = re.compile(r"(?:DUE|DATED|DTD|MAT)\W{0,3}$", re.I)
+
+
+def _trade_date(head, max_year):
+    """Last legible date in the row that isn't a bond's maturity/dated date
+    ("DUE 08/15/2029") and isn't in the future -- or None."""
+    best = None
+    for m in STRICT_DATE_RE.finditer(head):
+        if MATURITY_RE.search(head[:m.start()]):
+            continue
+        year = int(m.group(3))
+        year = year + 2000 if year < 100 else year
+        if 2000 <= year <= max_year and 1 <= int(m.group(1)) <= 12 and 1 <= int(m.group(2)) <= 31:
+            best = m
+    return best
+
+
+def parse_loose(line, max_year=None):
+    """A numbered row TAIL_RE couldn't read, anchored on its row number and
+    closing amount. Returns a row dict, or None if it isn't a real row."""
+    m = re.match(r"^(\d{1,4})\s+(.+)$", line)
+    if not m:
+        return None
+    a = AMT_END_RE.search(m.group(2))
+    if not a:
+        return None
+    low, high = parse_amount_ocr(a.group("amt"))
+    if low not in BRACKETS:
+        return None
+    head = m.group(2)[:a.start()].rstrip()
+    flag = FLAG_END_RE.search(head)
+    typ = re.search(TYPE_RE, head, re.I)
+    date = _trade_date(head, max_year or time.localtime().tm_year)
+    if not (flag or typ or date):
+        return None
+    cut = min([x.start() for x in (flag, typ, date) if x] + [len(head)])
+    return {
+        "row_num": int(m.group(1)),
+        "description": head[:cut].strip(" -•~"),
+        "tx_type": classify_type(typ.group()) if typ else None,
+        "tx_date": date.group(0) if date else None,
+        "notified_late": classify_late(flag.group(1)) if flag else None,
+        "amount_raw": a.group("amt").strip(),
+        "amount_low": low, "amount_high": high,
+    }
 
 
 def _session():
@@ -116,6 +190,8 @@ def clean_amount_ocr(raw):
     both substitutions are safe once isolated to just this text."""
     s = re.sub(r"[oO]", "0", raw)
     s = re.sub(r"(^|[-\s])[sS]+(?=\d)", r"\1$", s)
+    # the 2026 scans drop the thousands comma for a space: "$50 001" -> "$50,001"
+    s = re.sub(r"(\d)\s(\d{3})(?!\d)", r"\1,\2", s)
     return s.replace(".", ",").replace(";", ",")
 
 
@@ -172,8 +248,8 @@ def parse_text(text):
     """(rows, filed_date, expected_n) from a 278-T's OCR'd text. expected_n is
     a row-start marker count -- an upper bound on real transactions, since a
     handful never make it into `rows` at all (see ROW_START_RE)."""
-    rows, pending_desc, pending_num, filed = [], [], None, None
-    expected = set()
+    rows, pending_desc, pending_num, pending_flag, filed = [], [], None, None, None
+    expected, seen = set(), set()
     started = False  # pages 1-2 are certification/signature boilerplate, not
     # the transaction table -- their OCR garbage doesn't match any known
     # SKIP pattern (every filing mangles it differently) and was leaking into
@@ -187,6 +263,10 @@ def parse_text(text):
         if rm:
             filed = rm.group(1)
             started = True
+            continue
+        if TABLE_HEADER_RE.match(line):
+            started = True
+            pending_desc = []  # page-top furniture isn't part of any row
             continue
         if not started:
             continue
@@ -208,13 +288,23 @@ def parse_text(text):
                 "description": " ".join(d for d in pending_desc if d).strip(),
                 "tx_type": classify_type(m.group("type")),
                 "tx_date": m.group("date"),
-                "notified_late": classify_late(m.group("flag")),
+                "notified_late": classify_late(m.group("flag") or pending_flag or ""),
                 "amount_raw": m.group("amt").strip(),
                 "amount_low": low, "amount_high": high,
             })
-            pending_desc, pending_num = [], None
+            seen.add(row_num)
+            pending_desc, pending_num, pending_flag = [], None, None
+        elif (loose := parse_loose(line)) and loose["row_num"] not in seen:
+            if loose["notified_late"] is None and pending_flag:
+                loose["notified_late"] = classify_late(pending_flag)
+            rows.append(loose)
+            seen.add(loose["row_num"])
+            pending_desc, pending_num, pending_flag = [], None, None
         elif SKIP_RE.match(line):
             continue
+        elif NUM_FLAG_RE.match(line):
+            nf = NUM_FLAG_RE.match(line)
+            pending_num, pending_flag, pending_desc = int(nf.group(1)), nf.group(2), []
         elif NUM_ONLY_RE.match(line):
             pending_num = int(NUM_ONLY_RE.match(line).group(1))
         else:
@@ -243,13 +333,25 @@ def ensure_tables(con):
     # unlike the House form) -- a coupon-rate '%' in the description is a
     # decent bond/note tell, but a mangled coupon ("0S37S'Xi" for "05.375%")
     # won't match, so the fallback bucket is "couldn't tell," not "equity."
+    # Dates: OCR'd years come as 4 or 2 digits ("7/17/25", "9/14/26"), so
+    # each is parsed by its own length -- %Y on "26" yields the year 0026.
+    # A trade date after the filing's own received date, or in the future,
+    # is an OCR misread ("2026" read as "2028") and becomes NULL here; the
+    # raw text stays in trump_trades.tx_date, as filed.
+    con.execute("""
+        CREATE OR REPLACE MACRO qg_mdy(s) AS
+            CASE WHEN regexp_matches(s, '/\d{4}$') THEN try_strptime(s, '%m/%d/%Y')::DATE
+                 WHEN regexp_matches(s, '/\d{2}$') THEN try_strptime(s, '%m/%d/%y')::DATE END
+    """)
     con.execute("""
         CREATE OR REPLACE VIEW trump_trades_clean AS
-        SELECT try_strptime(tx_date, '%m/%d/%Y')::DATE AS txn_date,
+        SELECT CASE WHEN qg_mdy(tx_date) > coalesce(qg_mdy(filed), current_date)
+                      OR qg_mdy(tx_date) > current_date
+                    THEN NULL ELSE qg_mdy(tx_date) END AS txn_date,
                tx_type, amount_low, amount_high, notified_late,
                CASE WHEN regexp_matches(description, '[0-9](\\.[0-9]+)?\\s*%')
                     THEN 'Bond/Note' ELSE 'Unclassified' END AS asset_class,
-               description, doc_id, filed, link
+               description, doc_id, qg_mdy(filed) AS filed_date, filed, link
         FROM trump_trades
         WHERE description NOT LIKE '%$%'
           AND amount_low IN (1001, 15001, 50001, 100001, 250001, 500001,
@@ -257,9 +359,18 @@ def ensure_tables(con):
     """)
 
 
+def filed_from_name(file):
+    """Fallback filing date from the document name ("...-05.08.2026-278T" ->
+    "5/8/2026") when the OGE received stamp is missing or unreadable, as on
+    the 3,300-row 05.08.2026 (2) filing. That's the report date, which lands
+    within days of the received date -- close enough to date the filing."""
+    m = re.search(r"(\d{1,2})\.(\d{1,2})\.(\d{4})", file or "")
+    return f"{int(m.group(1))}/{int(m.group(2))}/{m.group(3)}" if m else None
+
+
 def done_doc_ids(con):
     """Filings that never need fetching again: only ones that parsed. An
-    'empty' or 'error' filing is retried every run -- the 2026 filings'
+    'empty', 'partial' or 'error' filing is retried every run -- the 2026 filings'
     DocumentCloud OCR is too garbled for parse_text today, and skipping
     anything ever attempted would bury them for good even once the parser
     (or the OCR) improves. A retry is one PDF download each."""
@@ -267,11 +378,14 @@ def done_doc_ids(con):
         "SELECT doc_id FROM trump_filings WHERE status = 'ok'").fetchall()}
 
 
-def main(limit=None, filer=PERSON):
+def main(limit=None, filer=PERSON, reparse=False):
     con = duckdb.connect(DB_PATH)
     try:
         ensure_tables(con)
-        done = done_doc_ids(con)
+        # --reparse re-fetches every filing, even ones that parsed 'ok' --
+        # for after a parser fix (the 08.12.2025 filing was stored with 3 of
+        # its ~500 rows before the two-line layout was handled).
+        done = set() if reparse else done_doc_ids(con)
 
         s = _session()
         docs = list(list_documents(s, filer))
@@ -291,7 +405,10 @@ def main(limit=None, filer=PERSON):
                 with pdfplumber.open(io.BytesIO(pdf.content)) as p:
                     text = "\n".join(pg.extract_text() or "" for pg in p.pages)
                 rows, filed, expected = parse_text(text)
-                status = "ok" if rows else "empty"
+                filed = filed or filed_from_name(file)
+                # under half the row markers recovered = mostly unreadable;
+                # 'partial' isn't 'ok', so it's retried (done_doc_ids)
+                status = ("ok" if len(rows) >= expected / 2 else "partial") if rows else "empty"
             except Exception as e:
                 rows, filed, expected, status = [], None, 0, "error"
                 print(f"  {doc_id} {file}: {e}")
@@ -319,12 +436,30 @@ def main(limit=None, filer=PERSON):
 
 
 def selftest():
+    # the loose fallback, on real lines from the 2026 scans
+    r = parse_loose("22 FACTSET RESH SYS INC IDUl'CNISO 4/17/2026 Vos S500 001 • $1,000,000", 2026)
+    assert r and r["row_num"] == 22 and r["amount_low"] == 500001 and r["amount_high"] == 1000000
+    assert r["tx_date"] == "4/17/2026" and r["notified_late"] is True and r["tx_type"] is None
+    assert r["description"] == "FACTSET RESH SYS INC IDUl'CNISO"
+    r = parse_loose("1 Abbott labs sale 5/512026 Yos $15 001 -$50 000", 2026)
+    assert r and r["tx_type"] == "Sale" and r["tx_date"] is None and r["amount_low"] == 15001
+    # a bond's maturity date is never taken as the trade date
+    r = parse_loose("11 OLIN CORP DUE 08/01/2029 05.825% purchase $1,001 - $15,000", 2026)
+    assert r and r["tx_date"] is None and r["tx_type"] == "Purchase"
+    # no second signal (flag/type/date) -> not a row
+    assert parse_loose("10 SOMETHING DISCRETIONARY ORDER $100,001 - $250,000", 2026) is None
+    # an amount off the Schedule B brackets -> not a row
+    assert parse_loose("7 ACME CORP purchase 1/2/2026 No $12,345 - $67,890", 2026) is None
+
     # only parsed filings count as done -- empty/error ones are retried
     mem = duckdb.connect(":memory:")
     ensure_tables(mem)
     for doc_id, status in [("1", "ok"), ("2", "empty"), ("3", "error")]:
         mem.execute("INSERT INTO trump_filings VALUES (?, 'f', NULL, 'l', ?, 0, 0)", [doc_id, status])
     assert done_doc_ids(mem) == {"1"}
+    assert filed_from_name("Trump, Donald J.-05.08.2026-278T(2)") == "5/8/2026"
+    assert filed_from_name("Donald J. Trump 2.26.2026 278-T (1)") == "2/26/2026"
+    assert filed_from_name("no date here") is None
 
     assert parse_amount_ocr("$250,001 - $500,000") == (250001, 500000)
     # OCR turns '$' into 's' and '0' into 'o'/'O' -- verbatim from a real
@@ -391,4 +526,4 @@ if __name__ == "__main__":
         selftest()
     else:
         n = arg("--limit")
-        main(int(n) if n else None, arg("--filer", PERSON))
+        main(int(n) if n else None, arg("--filer", PERSON), reparse="--reparse" in sys.argv)
