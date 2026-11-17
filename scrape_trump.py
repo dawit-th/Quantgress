@@ -257,11 +257,21 @@ def ensure_tables(con):
     """)
 
 
+def done_doc_ids(con):
+    """Filings that never need fetching again: only ones that parsed. An
+    'empty' or 'error' filing is retried every run -- the 2026 filings'
+    DocumentCloud OCR is too garbled for parse_text today, and skipping
+    anything ever attempted would bury them for good even once the parser
+    (or the OCR) improves. A retry is one PDF download each."""
+    return {r[0] for r in con.execute(
+        "SELECT doc_id FROM trump_filings WHERE status = 'ok'").fetchall()}
+
+
 def main(limit=None, filer=PERSON):
     con = duckdb.connect(DB_PATH)
     try:
         ensure_tables(con)
-        done = {r[0] for r in con.execute("SELECT doc_id FROM trump_filings").fetchall()}
+        done = done_doc_ids(con)
 
         s = _session()
         docs = list(list_documents(s, filer))
@@ -286,6 +296,7 @@ def main(limit=None, filer=PERSON):
                 rows, filed, expected, status = [], None, 0, "error"
                 print(f"  {doc_id} {file}: {e}")
 
+            con.execute("DELETE FROM trump_trades WHERE doc_id = ?", [doc_id])
             if rows:
                 con.executemany(
                     "INSERT INTO trump_trades VALUES (?,?,?,?,?,?,?,?,?,?,?)",
@@ -293,6 +304,8 @@ def main(limit=None, filer=PERSON):
                       r["tx_date"], r["notified_late"], r["amount_raw"],
                       r["amount_low"], r["amount_high"], filed, link)
                      for r in rows])
+            # a retried filing replaces its previous attempt (doc_id is the key)
+            con.execute("DELETE FROM trump_filings WHERE doc_id = ?", [doc_id])
             con.execute("INSERT INTO trump_filings VALUES (?,?,?,?,?,?,?)",
                         [doc_id, file, filed, link, status, len(rows), expected])
             note = f" (expected ~{expected})" if expected > len(rows) else ""
@@ -306,6 +319,13 @@ def main(limit=None, filer=PERSON):
 
 
 def selftest():
+    # only parsed filings count as done -- empty/error ones are retried
+    mem = duckdb.connect(":memory:")
+    ensure_tables(mem)
+    for doc_id, status in [("1", "ok"), ("2", "empty"), ("3", "error")]:
+        mem.execute("INSERT INTO trump_filings VALUES (?, 'f', NULL, 'l', ?, 0, 0)", [doc_id, status])
+    assert done_doc_ids(mem) == {"1"}
+
     assert parse_amount_ocr("$250,001 - $500,000") == (250001, 500000)
     # OCR turns '$' into 's' and '0' into 'o'/'O' -- verbatim from a real
     # filing (doc 26496956, row 191): "sale 12/19/2025 no s1.ooo,001 -ss,000,000"
