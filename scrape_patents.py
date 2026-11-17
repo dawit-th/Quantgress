@@ -34,6 +34,7 @@ import time
 import duckdb
 import requests
 
+from envfile import load_dotenv
 from schema import DB_PATH
 
 API = "https://api.uspto.gov/api/v1/patent/applications/search"
@@ -87,22 +88,8 @@ def parse_application(item):
     }
 
 
-def _load_dotenv():
-    # ponytail: stdlib KEY=value parser, not python-dotenv -- one key in one
-    # file doesn't earn a new dependency. Doesn't override a real env var.
-    path = os.path.join(os.path.dirname(__file__), ".env")
-    if not os.path.exists(path):
-        return
-    for line in open(path):
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        k, v = line.split("=", 1)
-        os.environ.setdefault(k.strip(), v.strip())
-
-
 def _session():
-    _load_dotenv()
+    load_dotenv()
     key = os.environ.get("USPTO_API_KEY")
     if not key:
         sys.exit("USPTO_API_KEY not set -- sign up for a free MyUSPTO account "

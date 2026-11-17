@@ -67,6 +67,7 @@ import zipfile
 import duckdb
 import requests
 
+from envfile import load_dotenv
 from schema import DB_PATH
 
 REGISTRY_URL = "https://registry.faa.gov/database/ReleasableAircraft.zip"
@@ -192,26 +193,12 @@ def load_registry(con):
 
 # ----------------------------------------------------------------- flights
 
-def _load_dotenv():
-    # ponytail: same six-line KEY=value reader as scrape_patents/scrape_donors,
-    # not python-dotenv. Copied rather than factored out -- three copies of six
-    # lines is cheaper to read than a shared config module nobody else imports.
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
-    if not os.path.exists(path):
-        return
-    for line in open(path, encoding="utf-8"):
-        line = line.strip()
-        if line and not line.startswith("#") and "=" in line:
-            k, v = line.split("=", 1)
-            os.environ.setdefault(k.strip(), v.strip())
-
-
 def _session():
     """OAuth2 client-credentials session. Not optional: OpenSky answers an
     anonymous /flights/aircraft with 403, so an unauthenticated run has nothing
     to fall back to. Same shape as scrape_patents/scrape_donors' key checks --
     fail up front with the signup URL rather than deep in a loop."""
-    _load_dotenv()
+    load_dotenv()
     cid = os.environ.get("OPENSKY_CLIENT_ID")
     secret = os.environ.get("OPENSKY_CLIENT_SECRET")
     if not (cid and secret):

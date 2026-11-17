@@ -46,6 +46,7 @@ import time
 import duckdb
 import requests
 
+from envfile import load_dotenv
 from schema import DB_PATH
 
 API = "https://api.open.fec.gov/v1/schedules/schedule_a/"
@@ -108,22 +109,8 @@ def parse_record(item):
     }
 
 
-def _load_dotenv():
-    # ponytail: same stdlib .env loader as scrape_patents.py -- copy, not a
-    # shared helper, until a third phase wants one too.
-    path = os.path.join(os.path.dirname(__file__), ".env")
-    if not os.path.exists(path):
-        return
-    for line in open(path):
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        k, v = line.split("=", 1)
-        os.environ.setdefault(k.strip(), v.strip())
-
-
 def _session():
-    _load_dotenv()
+    load_dotenv()
     key = os.environ.get("FEC_API_KEY")
     if not key:
         sys.exit("FEC_API_KEY not set -- free instant signup at "

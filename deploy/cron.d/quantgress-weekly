@@ -9,5 +9,4 @@
 # watchlist exists, or wire it in here once Phase 8 grows one.
 #
 # minute hour dom month dow  user     command
-     0    7    *    *    0   ubuntu   cd /home/ubuntu/quantgress && venv/bin/python scrape_contracts.py >> logs/contracts.log 2>&1
-    15    7    *    *    0   ubuntu   cd /home/ubuntu/quantgress && venv/bin/python scrape_patents.py >> logs/patents.log 2>&1
+     0    7    *    *    0   ubuntu   cd /home/ubuntu/quantgress && venv/bin/python run_job.py weekly >> logs/run_job.log 2>&1

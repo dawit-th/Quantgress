@@ -50,6 +50,7 @@ import time
 import duckdb
 import requests
 
+from envfile import load_dotenv
 from schema import DB_PATH
 
 TOKEN_URL = "https://www.reddit.com/api/v1/access_token"
@@ -181,18 +182,6 @@ def aggregate(posts, classify):
 
 # --------------------------------------------------------------------- reddit
 
-def _load_dotenv():
-    # ponytail: same six-line KEY=value reader as scrape_flights/patents/donors.
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
-    if not os.path.exists(path):
-        return
-    for line in open(path, encoding="utf-8"):
-        line = line.strip()
-        if line and not line.startswith("#") and "=" in line:
-            k, v = line.split("=", 1)
-            os.environ.setdefault(k.strip(), v.strip())
-
-
 def _session():
     """Application-only OAuth2 (client_credentials). A script app is a
     confidential client, which Reddit's OAuth2 docs allow this grant for, so
@@ -202,7 +191,7 @@ def _session():
 
     Anonymous www.reddit.com/*.json is not a fallback -- unauthenticated
     automated access is barred outright, so a keyless run has nowhere to go."""
-    _load_dotenv()
+    load_dotenv()
     cid = os.environ.get("REDDIT_CLIENT_ID")
     secret = os.environ.get("REDDIT_CLIENT_SECRET")
     if not (cid and secret):
