@@ -145,7 +145,23 @@ def fetch_day(s, day):
     r = _get(s, URL.format(date=day.strftime("%Y%m%d")))
     if r is None:
         return None
-    return parse_file(r.text, day.isoformat())
+    rows = parse_file(r.text, day.isoformat())
+    warning = parse_ratio_warning(r.text, rows, day)
+    if warning:
+        print(warning)
+    return rows
+
+
+def parse_ratio_warning(text, rows, day, min_ratio=0.9):
+    """A parser that silently drops rows looks exactly like a quiet day. The
+    isdigit() bug kept 429 of 12,307 rows for weeks with no error anywhere --
+    so say so whenever under 90% of a file's data lines survive parsing."""
+    data_lines = sum(1 for line in text.splitlines()
+                     if line.strip() and not line.startswith("Date|"))
+    if data_lines and len(rows) / data_lines < min_ratio:
+        return (f"  WARNING {day}: kept {len(rows)} of {data_lines} data lines "
+                f"({len(rows) / data_lines:.0%}) -- has FINRA's file format changed?")
+    return None
 
 
 def daterange(start, end):
@@ -283,6 +299,14 @@ def selftest():
                       "2026-11-10")
     assert len(frac) == 1 and frac[0]["short_volume"] == 259692.896076
     assert frac[0]["short_exempt_volume"] == 48.0
+
+    # the parse-ratio check flags a file where most rows fail to parse
+    header = "Date|Symbol|ShortVolume|ShortExemptVolume|TotalVolume|Market\n"
+    good = header + "".join(f"20261110|S{i}|1|0|2|Q\n" for i in range(10))
+    bad = header + "".join(f"20261110|S{i}|n/a|0|2|Q\n" for i in range(9)) + "20261110|OK|1|0|2|Q\n"
+    assert parse_ratio_warning(good, parse_file(good, "2026-11-10"), "2026-11-10") is None
+    w = parse_ratio_warning(bad, parse_file(bad, "2026-11-10"), "2026-11-10")
+    assert w and "kept 1 of 10" in w
 
     # an old BIGINT table gets widened in place, existing rows kept
     con = duckdb.connect(":memory:")
