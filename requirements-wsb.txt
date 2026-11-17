@@ -1,0 +1,7 @@
+# Phase 21 only (scrape_wsb.py's FinBERT sentiment). Lazily imported, so skip
+# this file entirely if you never run WSB, or run it with --no-sentiment.
+# torch is ~2GB installed. Not pinned yet: never installed in this project,
+# so there's no known-good version to pin to -- pin after the first real run.
+-r requirements.txt
+transformers
+torch

@@ -1,15 +1,17 @@
-requests
-beautifulsoup4
-pandas
-lxml
-duckdb
-pdfplumber
-pyyaml
-fastapi
-uvicorn
-httpx
-slowapi
-# Phase 21 sentiment only (scrape_wsb.py) -- lazily imported, skip both if you
-# only ever run it with --no-sentiment. torch is ~2GB installed.
-transformers
-torch
+# Pinned to the versions this project is run and tested with (CI installs
+# exactly these). A parser silently changing behavior on an upgrade is the
+# failure mode this guards against -- bump deliberately, then run every
+# module's --selftest.
+requests==2.34.2
+beautifulsoup4==4.15.0
+pandas==3.1.1
+lxml==6.1.3
+duckdb==2.0.0
+pdfplumber==0.11.10
+pyyaml==6.0.3
+fastapi==0.162.4
+uvicorn==0.54.0
+httpx==0.28.1
+slowapi==0.1.10
+# Phase 21 sentiment (scrape_wsb.py, ~2GB with torch) is in
+# requirements-wsb.txt -- only needed once WSB is actually run.

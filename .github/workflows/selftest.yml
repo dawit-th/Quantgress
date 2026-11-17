@@ -1,0 +1,34 @@
+# Every module's --selftest on each push and PR. They're offline by design
+# (no scraping, no real DB), so this is fast and needs no secrets.
+name: selftest
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -r requirements.txt
+      # api.py is skipped on purpose: its selftest runs every route against
+      # the real congress_trades.duckdb (asserts rows exist), which a clean
+      # checkout doesn't have. Run it locally: python api.py --selftest
+      - name: run every module's --selftest
+        run: |
+          failed=0
+          for f in *.py; do
+            grep -q -- "--selftest" "$f" || continue
+            [ "$f" = api.py ] && continue
+            if python "$f" --selftest > "/tmp/$f.log" 2>&1; then
+              echo "ok    $f"
+            else
+              echo "FAIL  $f"; cat "/tmp/$f.log"; failed=1
+            fi
+          done
+          exit $failed
